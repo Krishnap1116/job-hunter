@@ -1,0 +1,36 @@
+name: Analyze Jobs
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Number of jobs to analyze'
+        required: false
+        default: '20'
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+      
+      - name: Analyze jobs
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          # EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+          # EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        run: |
+          python matcher.py --limit ${{ github.event.inputs.limit }}
