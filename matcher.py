@@ -26,47 +26,36 @@ def analyze_job(job):
     """Analyze single job with Claude - H1B aware"""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     
-    prompt = f"""Analyze this job for an INTERNATIONAL STUDENT who will need H1B sponsorship in 2 years.
+    prompt = f"""Analyze this ENTRY-LEVEL job. Visa/citizenship already filtered out.
 
 MY PROFILE:
 Core Skills (must-have): {', '.join(RESUME_PROFILE['core_skills'])}
 Important: {', '.join(RESUME_PROFILE['important_skills'])}
 Nice-to-have: {', '.join(RESUME_PROFILE['nice_skills'])}
 
-Forbidden (auto-reject): {', '.join(RESUME_PROFILE['forbidden_keywords'])}
-
-VISA STATUS:
-- Currently on F-1/OPT or will be
-- Will need H1B sponsorship within 2 years
-- Cannot accept roles requiring US citizenship or security clearance
-
 JOB:
 Company: {job['Company']}
 Title: {job['Title']}
 Description: {job['Description'][:2000]}
 
-CRITICAL: Return ONLY valid JSON with NO additional text, explanations, or markdown.
-Do not include ```, ***, or any other formatting.
-Start with {{ and end with }}.
-
+Return JSON only (no markdown):
 {{
-  "relevant": true/false,
-  "ats_safe": true/false,
-  "visa_friendly": true/false,
-  "visa_notes": "mentions sponsorship OR neutral OR requires citizenship",
+  "relevant": true if ML/AI/Software role matching my skills,
+  "ats_safe": true if I have core skills,
+  "visa_friendly": true,
+  "visa_notes": "pre-screened for H1B friendliness",
   "match_score": 0-100,
-  "tier": 1 or 2 or null,
-  "why_strong": "Brief reason if tier 1 OR null",
-  "risks": "What I'd need to learn OR visa concerns OR null"
+  "tier": 1 if strong technical match else 2,
+  "why_strong": "reason if tier 1",
+  "risks": "skills to learn"
 }}
 
 Rules:
-- visa_friendly=false if mentions: citizenship, clearance, "must be authorized", "no sponsorship"
-- ats_safe=false if ANY core skill missing
-- Tier 1 ONLY for: ML systems, RAG, production AI, reliability-critical
-- match_score: core=3x weight, important=2x, nice=1x
-- If forbidden keyword OR not visa_friendly → relevant=false
-- Use null (not "null" or empty string) for missing values
+- visa_friendly is ALWAYS true (already filtered)
+- ats_safe=false ONLY if missing core technical skills
+- Tier 1: Strong match on ML/AI skills, interesting company
+- Tier 2: Acceptable match, good backup option
+- Forbidden roles: {', '.join(RESUME_PROFILE['forbidden_keywords'])}
 """
     
     try:
