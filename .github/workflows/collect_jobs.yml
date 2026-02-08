@@ -28,5 +28,8 @@ jobs:
           # EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
           # EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_API_KEY: ${{ secrets.ADZUNA_API_KEY }}
+          JSEARCH_API_KEY: ${{ secrets.JSEARCH_API_KEY }}
         run: |
           python scraper.py
