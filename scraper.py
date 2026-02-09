@@ -50,7 +50,25 @@ SENIOR_KEYWORDS = [
     'chief'
 ]
 
+
 # ==================== HELPER FUNCTIONS ====================
+
+def is_full_time_only(text):
+    text = text.lower()
+    
+    reject_terms = [
+        'contract', 'contractor', 'part-time', 'part time',
+        'freelance', 'temporary', 'temp', 'hourly',
+        'consultant', '1099', 'c2c', 'corp-to-corp',
+        'intern', 'internship', 'seasonal'
+    ]
+    
+    for term in reject_terms:
+        if term in text:
+            return False, term
+    
+    return True, None
+
 
 def has_hard_blocker(text):
     """Check for citizenship/clearance requirements"""
@@ -135,6 +153,10 @@ def fetch_jsearch_jobs():
                     print(f"  ⛔ {company} - {blocker}")
                     continue
                 
+                is_full_time, reason = is_full_time_only(title + description)
+                if not is_full_time:
+                    continue
+
                 print(f"  ✅ {company} - {title}")
                 
                 job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
@@ -179,6 +201,7 @@ def fetch_greenhouse_jobs():
                 title = job.get('title', '')
                 job_url = job.get('absolute_url', '')
                 location = job.get('location', {}).get('name', '')
+                description = job.get('job_description', '')
                 
                 # USA check
                 if location and 'United States' not in location and 'Remote' not in location:
@@ -187,6 +210,10 @@ def fetch_greenhouse_jobs():
                 # Clearly senior check
                 if is_clearly_senior(title):
                     continue
+                is_full_time, reason = is_full_time_only(title + description)
+                if not is_full_time:
+                    continue
+
                 
                 print(f"  ✅ {company_id.title()} - {title}")
                 
@@ -231,6 +258,7 @@ def fetch_lever_jobs():
                 title = job.get('text', '')
                 job_url = job.get('hostedUrl', '')
                 location = job.get('categories', {}).get('location', '')
+                description = job.get('job_description', '')
                 
                 # USA check
                 if location and 'United States' not in location and 'Remote' not in location:
@@ -239,6 +267,10 @@ def fetch_lever_jobs():
                 # Clearly senior check
                 if is_clearly_senior(title):
                     continue
+                is_full_time, reason = is_full_time_only(title + description)
+                if not is_full_time:
+                    continue
+
                 
                 print(f"  ✅ {company_id.title()} - {title}")
                 
@@ -284,6 +316,7 @@ def fetch_simplify_github():
             locations = job.get('locations', [])
             job_url = job.get('url', '')
             active = job.get('active', True)
+            description = job.get('job_description', '')
             
             if not active or not job_url:
                 continue
@@ -297,6 +330,10 @@ def fetch_simplify_github():
             if is_government(company):
                 continue
             
+            is_full_time, reason = is_full_time_only(title + description)
+            if not is_full_time:
+                continue
+
             print(f"  ✅ {company} - {title}")
             
             job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
@@ -349,7 +386,7 @@ def save_to_sheets(jobs):
                     job['date_found'],
                     job['status']
                 ])
-        
+
         if new_jobs:
             worksheet.append_rows(new_jobs)
             print(f"\n✅ Added {len(new_jobs)} new jobs to sheet")
@@ -361,7 +398,6 @@ def save_to_sheets(jobs):
     except Exception as e:
         print(f"\n❌ Error saving: {e}")
         return 0
-
 def main():
     print("=" * 80)
     print("🎯 NEW GRAD JOB HUNTER - Production Edition")
