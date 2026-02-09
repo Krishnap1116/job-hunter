@@ -169,6 +169,7 @@ def save_analysis(job, analysis):
             analysis.get('match_score', 0),
             analysis.get('why_strong', ''),
             combined_risks,
+            job.get('Date Found', ''), 
             '',  # Apply checkbox
             ''   # Applied date
         ]
