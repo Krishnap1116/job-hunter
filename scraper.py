@@ -1,25 +1,29 @@
-# scraper.py - PRODUCTION VERSION
+# scraper.py - PRODUCTION VERSION - FIXED
 
 import requests
 import os
 from datetime import datetime
 import hashlib
+import time
 
 # ==================== CONFIGURATION ====================
 
 JSEARCH_API_KEY = os.getenv("JSEARCH_API_KEY")
 
+# UPDATED: Broader queries (let Claude filter)
 SEARCH_QUERIES = [
-    "software engineer new grad",
-    "machine learning engineer entry level",
-    "AI engineer junior",
-    "backend engineer new graduate",
-    "full stack engineer entry level"
+    "software engineer",
+    "machine learning engineer",
+    "AI engineer",
+    "backend engineer",
+    "full stack engineer",
+    "data engineer",
+    "ML engineer"
 ]
 
 GREENHOUSE_COMPANIES = [
     'stripe', 'ramp', 'notion', 'figma', 'anthropic', 
-    'scale', 'discord', 'airtable', 'brex'
+    'scale', 'discord', 'airtable', 'brex', 'openai'
 ]
 
 LEVER_COMPANIES = [
@@ -35,40 +39,71 @@ VISA_BLOCKERS = [
     'active clearance',
     'no visa sponsorship',
     'cannot sponsor',
-    'will not sponsor'
+    'will not sponsor',
+    'must be authorized to work without sponsorship'
 ]
 
-# Seniority exclusions (minimal filtering)
+# Seniority exclusions (MINIMAL - only obvious senior)
 SENIOR_KEYWORDS = [
     'staff engineer',
     'principal engineer',
     'senior manager',
+    'engineering manager',
     'director of',
     'vp of',
     'vice president',
     'head of engineering',
-    'chief'
+    'chief',
+    'lead engineer'  # But NOT "Software Engineer, Lead" (title order matters)
 ]
-
 
 # ==================== HELPER FUNCTIONS ====================
 
-def is_full_time_only(text):
-    text = text.lower()
+def is_usa_only(location_text):
+    """STRICT USA-only check"""
+    if not location_text:
+        return False
     
-    reject_terms = [
-        'contract', 'contractor', 'part-time', 'part time',
-        'freelance', 'temporary', 'temp', 'hourly',
-        'consultant', '1099', 'c2c', 'corp-to-corp',
-        'intern', 'internship', 'seasonal'
+    location_lower = location_text.lower()
+    
+    # REJECT if mentions other countries
+    reject_countries = [
+        'canada', 'toronto', 'vancouver', 'montreal', 'ottawa',
+        'uk', 'united kingdom', 'london', 'england',
+        'india', 'bangalore', 'mumbai', 'hyderabad', 'pune',
+        'europe', 'germany', 'france', 'spain', 'netherlands',
+        'australia', 'sydney', 'melbourne',
+        'mexico', 'brazil', 'argentina',
+        'china', 'japan', 'singapore', 'korea'
     ]
     
-    for term in reject_terms:
-        if term in text:
-            return False, term
+    for country in reject_countries:
+        if country in location_lower:
+            return False
     
-    return True, None
-
+    # ACCEPT only if explicitly USA
+    usa_indicators = [
+        'united states', 'usa', 'u.s.', 'us,',
+        # States
+        'california', 'new york', 'texas', 'florida', 'washington',
+        'massachusetts', 'illinois', 'colorado', 'oregon', 'georgia',
+        # Cities
+        'san francisco', 'nyc', 'seattle', 'austin', 'boston',
+        'chicago', 'denver', 'los angeles', 'atlanta', 'portland',
+        # Remote USA
+        'remote us', 'remote usa', 'remote - us', 'remote (us)',
+        'us remote', 'united states remote'
+    ]
+    
+    for indicator in usa_indicators:
+        if indicator in location_lower:
+            return True
+    
+    # If just "Remote" with no country, REJECT (ambiguous)
+    if location_lower.strip() in ['remote', 'remote work', 'work from home']:
+        return False
+    
+    return False
 
 def has_hard_blocker(text):
     """Check for citizenship/clearance requirements"""
@@ -79,20 +114,56 @@ def has_hard_blocker(text):
     return False, None
 
 def is_clearly_senior(title):
-    """Only reject obviously senior roles"""
+    """Only reject OBVIOUSLY senior roles"""
     title_lower = title.lower()
-    return any(kw in title_lower for kw in SENIOR_KEYWORDS)
+    
+    # Check if senior keyword is at START of title (more strict)
+    for keyword in SENIOR_KEYWORDS:
+        # "Staff Engineer" = reject
+        # "Engineering Staff" = don't reject
+        if title_lower.startswith(keyword) or f" {keyword}" in title_lower:
+            return True
+    
+    return False
 
 def is_government(company):
     """Reject government/defense contractors"""
     company_lower = company.lower()
     gov_keywords = [
-        'department of', 'federal', 'government',
+        'department of', 'federal', 'government', 'dept of',
         'raytheon', 'lockheed', 'northrop', 'booz allen',
-        'leidos', 'general dynamics'
+        'leidos', 'general dynamics', 'l3harris', 'saic',
+        'mitre', 'aerospace corporation'
     ]
     return any(kw in company_lower for kw in gov_keywords)
-
+def is_obviously_not_fulltime(text):
+    """Only reject OBVIOUS non-full-time roles"""
+    text_lower = text.lower()
+    
+    # Hard rejects (definitely not full-time)
+    hard_rejects = [
+        'internship',
+        'intern ',
+        ' intern',
+        'part-time',
+        'part time',
+        'freelance',
+        'freelancer',
+        '1099',
+        'hourly contract',
+        'temporary position',
+        'seasonal',
+        'consultant position',
+        'consulting role',
+        'project-based',
+        'gig work'
+    ]
+    
+    for term in hard_rejects:
+        if term in text_lower:
+            return True, term
+    
+    return False, None
 # ==================== JOB SOURCES ====================
 
 def fetch_jsearch_jobs():
@@ -118,13 +189,14 @@ def fetch_jsearch_jobs():
                 "page": "1",
                 "num_pages": "1",
                 "date_posted": "today",
-                "employment_types": "FULLTIME",
-                "job_requirements": "under_3_years_experience"
+                "employment_types": "FULLTIME"
+                # REMOVED: job_requirements filter (let Claude decide)
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=15)
             
             if response.status_code != 200:
+                print(f"  ⚠️ JSearch returned {response.status_code} for '{query}'")
                 continue
             
             data = response.json()
@@ -134,9 +206,15 @@ def fetch_jsearch_jobs():
                 title = job.get('job_title', '')
                 description = job.get('job_description', '')
                 job_url = job.get('job_apply_link', '')
+                location = job.get('job_city', '') + ', ' + job.get('job_state', '')
                 
                 # Skip if no URL
                 if not job_url or not job_url.startswith('http'):
+                    continue
+                
+                # STRICT USA check
+                full_location = location + ' ' + job.get('job_country', '')
+                if not is_usa_only(full_location):
                     continue
                 
                 # Government check
@@ -147,16 +225,16 @@ def fetch_jsearch_jobs():
                 if is_clearly_senior(title):
                     continue
                 
+                is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
+                if is_not_ft:
+                    print(f"  ⛔ {company} - not full-time: {reason}")
+                    continue
                 # Hard visa blockers
                 has_blocker, blocker = has_hard_blocker(title + ' ' + description)
                 if has_blocker:
                     print(f"  ⛔ {company} - {blocker}")
                     continue
                 
-                is_full_time, reason = is_full_time_only(title + description)
-                if not is_full_time:
-                    continue
-
                 print(f"  ✅ {company} - {title}")
                 
                 job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
@@ -201,19 +279,19 @@ def fetch_greenhouse_jobs():
                 title = job.get('title', '')
                 job_url = job.get('absolute_url', '')
                 location = job.get('location', {}).get('name', '')
-                description = job.get('job_description', '')
                 
-                # USA check
-                if location and 'United States' not in location and 'Remote' not in location:
+                # STRICT USA check
+                if not is_usa_only(location):
                     continue
                 
                 # Clearly senior check
                 if is_clearly_senior(title):
                     continue
-                is_full_time, reason = is_full_time_only(title + description)
-                if not is_full_time:
-                    continue
 
+                is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
+                if is_not_ft:
+                    print(f"  ⛔ {company} - not full-time: {reason}")
+                    continue
                 
                 print(f"  ✅ {company_id.title()} - {title}")
                 
@@ -258,18 +336,19 @@ def fetch_lever_jobs():
                 title = job.get('text', '')
                 job_url = job.get('hostedUrl', '')
                 location = job.get('categories', {}).get('location', '')
-                description = job.get('job_description', '')
                 
-                # USA check
-                if location and 'United States' not in location and 'Remote' not in location:
+                # STRICT USA check
+                if not is_usa_only(location):
                     continue
                 
                 # Clearly senior check
                 if is_clearly_senior(title):
                     continue
-                is_full_time, reason = is_full_time_only(title + description)
-                if not is_full_time:
+                is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
+                if is_not_ft:
+                    print(f"  ⛔ {company} - not full-time: {reason}")
                     continue
+
 
                 
                 print(f"  ✅ {company_id.title()} - {title}")
@@ -316,24 +395,23 @@ def fetch_simplify_github():
             locations = job.get('locations', [])
             job_url = job.get('url', '')
             active = job.get('active', True)
-            description = job.get('job_description', '')
             
             if not active or not job_url:
                 continue
             
-            # USA check
+            # STRICT USA check
             location_str = ' '.join(locations) if isinstance(locations, list) else str(locations)
-            if 'United States' not in location_str and 'Remote' not in location_str:
+            if not is_usa_only(location_str):
                 continue
             
             # Government check
             if is_government(company):
                 continue
             
-            is_full_time, reason = is_full_time_only(title + description)
-            if not is_full_time:
+            is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
+            if is_not_ft:
+                print(f"  ⛔ {company} - not full-time: {reason}")
                 continue
-
             print(f"  ✅ {company} - {title}")
             
             job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
@@ -359,7 +437,7 @@ def fetch_simplify_github():
 # ==================== MAIN ====================
 
 def save_to_sheets(jobs):
-    """Save to Google Sheets - NO URL VALIDATION"""
+    """Save to Google Sheets"""
     from sheets_helper import get_sheet
     
     if not jobs:
@@ -398,9 +476,10 @@ def save_to_sheets(jobs):
     except Exception as e:
         print(f"\n❌ Error saving: {e}")
         return 0
+
 def main():
     print("=" * 80)
-    print("🎯 NEW GRAD JOB HUNTER - Production Edition")
+    print("🎯 NEW GRAD JOB HUNTER - Fixed Edition")
     print("=" * 80)
     print("Sources:")
     print("  • JSearch API (Google Jobs, LinkedIn, ZipRecruiter)")
@@ -408,10 +487,10 @@ def main():
     print("  • Lever (Startups)")
     print("  • SimplifyJobs (Curated new grad list)")
     print("\nFiltering:")
-    print("  • Minimal seniority filter (only obviously senior roles)")
-    print("  • Hard visa blockers only (citizenship, clearance, no sponsorship)")
-    print("  • No URL validation (trusted sources)")
-    print("  • Claude handles precision filtering")
+    print("  • STRICT USA-only (no Canada, no ambiguous 'Remote')")
+    print("  • Minimal seniority filter (only obvious senior roles)")
+    print("  • Hard visa blockers (citizenship, clearance, no sponsorship)")
+    print("  • Claude handles employment type & skill matching")
     print("=" * 80)
     
     all_jobs = []
@@ -424,7 +503,7 @@ def main():
     
     print(f"\n📊 Total jobs collected: {len(all_jobs)}")
     
-    # Save (no URL validation)
+    # Save
     new_count = save_to_sheets(all_jobs)
     
     print("\n" + "=" * 80)
@@ -436,5 +515,4 @@ def main():
     print("=" * 80)
 
 if __name__ == "__main__":
-    import time
     main()

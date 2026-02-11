@@ -7,15 +7,39 @@ from sheets_helper import get_sheet
 from config import ANTHROPIC_API_KEY, RESUME_PROFILE
 
 def get_unanalyzed_jobs(limit=20):
-    """Get jobs with Status='Raw'"""
+    """Get jobs with Status='Raw' from TODAY ONLY"""
+    from datetime import datetime
+    
     try:
         sheet = get_sheet()
         worksheet = sheet.worksheet("Raw Jobs")
         
         all_data = worksheet.get_all_records()
-        raw_jobs = [job for job in all_data if job.get('Status') == 'Raw']
         
-        print(f"Found {len(raw_jobs)} unanalyzed jobs")
+        # Get today's date
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # Filter: Status='Raw' AND Date Found = today
+        raw_jobs = [
+            job for job in all_data 
+            if job.get('Status') == 'Raw' 
+            and job.get('Date Found') == today
+        ]
+        
+        print(f"Found {len(raw_jobs)} unanalyzed jobs from today ({today})")
+        
+        # If no jobs today, check yesterday (in case of timezone issues)
+        if not raw_jobs:
+            from datetime import timedelta
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            raw_jobs = [
+                job for job in all_data 
+                if job.get('Status') == 'Raw' 
+                and job.get('Date Found') == yesterday
+            ]
+            if raw_jobs:
+                print(f"  (Found {len(raw_jobs)} from yesterday {yesterday})")
+        
         return raw_jobs[:limit]
         
     except Exception as e:
@@ -23,10 +47,10 @@ def get_unanalyzed_jobs(limit=20):
         return []
 
 def analyze_job(job):
-    """Analyze single job with Claude - H1B aware"""
+    """Analyze single job with Claude - STRICT FULL-TIME ONLY"""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     
-    prompt = f"""Analyze this ENTRY-LEVEL job. Visa/citizenship already filtered out.
+    prompt = f"""Analyze this job for FULL-TIME PERMANENT employment only.
 
 MY PROFILE:
 Core Skills (must-have): {', '.join(RESUME_PROFILE['core_skills'])}
@@ -38,8 +62,18 @@ Company: {job['Company']}
 Title: {job['Title']}
 Description: {job['Description'][:2000]}
 
+CRITICAL EMPLOYMENT RULES:
+- ACCEPT: Full-time, Permanent, FTE, W2 employee, Salaried position
+- ACCEPT: Contract-to-hire (if explicitly states conversion to full-time)
+- ACCEPT: Contract (if W2 contract through employer, not 1099)
+- REJECT: Part-time, Internship, Freelance, 1099, Consulting, Temporary
+- REJECT: Contract (if 1099 or no mention of conversion)
+- REJECT: "Initially contract" unless explicitly says "converts to full-time"
+
 Return JSON only (no markdown):
 {{
+  "employment_type": "full-time / contract-to-hire / contract / part-time / internship / unclear",
+  "employment_acceptable": true if full-time or contract-to-hire with FTE conversion,
   "relevant": true if ML/AI/Software role matching my skills,
   "ats_safe": true if I have core skills,
   "visa_friendly": true,
@@ -51,13 +85,15 @@ Return JSON only (no markdown):
 }}
 
 Rules:
+- employment_acceptable=false → relevant MUST be false (reject the job)
+- If description unclear on employment type, mark employment_acceptable=false
 - visa_friendly is ALWAYS true (already filtered)
 - ats_safe=false ONLY if missing core technical skills
-- Tier 1: Strong match on ML/AI skills, interesting company
-- Tier 2: Acceptable match, good backup option
+- Tier 1: Strong match on ML/AI skills, interesting company, full-time
+- Tier 2: Acceptable match, good backup option, full-time
 - Forbidden roles: {', '.join(RESUME_PROFILE['forbidden_keywords'])}
 """
-    
+        
     try:
         response = client.messages.create(
             model="claude-3-5-haiku-20241022",
@@ -131,10 +167,21 @@ def save_analysis(job, analysis):
     try:
         sheet = get_sheet()
         
-        # Reject if not relevant, not ATS safe, OR not visa friendly
+        # Reject if not relevant, not ATS safe, not visa friendly, OR not acceptable employment
         if not analysis:
             return False
+        
+        # NEW: Check employment type
+        if not analysis.get('employment_acceptable'):
+            raw_sheet = sheet.worksheet("Raw Jobs")
+            cell = raw_sheet.find(job['Job ID'])
+            if cell:
+                raw_sheet.update_cell(cell.row, 8, 'Rejected')
             
+            emp_type = analysis.get('employment_type', 'unknown')
+            print(f"  ❌ Rejected: not full-time ({emp_type})")
+            return False
+        
         if not analysis.get('relevant') or not analysis.get('ats_safe') or not analysis.get('visa_friendly'):
             raw_sheet = sheet.worksheet("Raw Jobs")
             cell = raw_sheet.find(job['Job ID'])
