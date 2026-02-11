@@ -1,16 +1,19 @@
-# scraper.py - PRODUCTION VERSION - FIXED
+# scraper.py - MULTI-API PRODUCTION VERSION
 
 import requests
 import os
 from datetime import datetime
 import hashlib
 import time
+import re
 
 # ==================== CONFIGURATION ====================
 
 JSEARCH_API_KEY = os.getenv("JSEARCH_API_KEY")
+ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
+ADZUNA_API_KEY = os.getenv("ADZUNA_API_KEY")
 
-# UPDATED: Broader queries (let Claude filter)
+# Broader queries (let Claude filter)
 SEARCH_QUERIES = [
     "software engineer",
     "machine learning engineer",
@@ -23,11 +26,13 @@ SEARCH_QUERIES = [
 
 GREENHOUSE_COMPANIES = [
     'stripe', 'ramp', 'notion', 'figma', 'anthropic', 
-    'scale', 'discord', 'airtable', 'brex', 'openai'
+    'scale', 'discord', 'airtable', 'brex', 'openai',
+    'databricks', 'snowflake', 'confluent'
 ]
 
 LEVER_COMPANIES = [
-    'rippling', 'plaid', 'retool', 'verkada', 'faire'
+    'rippling', 'plaid', 'retool', 'verkada', 'faire',
+    'superhuman', 'loom', 'mux'
 ]
 
 # Hard blockers (reject during scraping)
@@ -54,7 +59,7 @@ SENIOR_KEYWORDS = [
     'vice president',
     'head of engineering',
     'chief',
-    'lead engineer'  # But NOT "Software Engineer, Lead" (title order matters)
+    'lead engineer'
 ]
 
 # ==================== HELPER FUNCTIONS ====================
@@ -117,10 +122,7 @@ def is_clearly_senior(title):
     """Only reject OBVIOUSLY senior roles"""
     title_lower = title.lower()
     
-    # Check if senior keyword is at START of title (more strict)
     for keyword in SENIOR_KEYWORDS:
-        # "Staff Engineer" = reject
-        # "Engineering Staff" = don't reject
         if title_lower.startswith(keyword) or f" {keyword}" in title_lower:
             return True
     
@@ -136,11 +138,11 @@ def is_government(company):
         'mitre', 'aerospace corporation'
     ]
     return any(kw in company_lower for kw in gov_keywords)
+
 def is_obviously_not_fulltime(text):
     """Only reject OBVIOUS non-full-time roles"""
     text_lower = text.lower()
     
-    # Hard rejects (definitely not full-time)
     hard_rejects = [
         'internship',
         'intern ',
@@ -169,47 +171,33 @@ def requires_too_much_experience(text):
     """Reject jobs clearly requiring 4+ years experience"""
     text_lower = text.lower()
     
-    # Pattern: "X+ years" or "X years" where X >= 4
-    import re
-    
     # Find patterns like "5+ years", "4 years", "6-8 years"
     patterns = [
-        r'(\d+)\+?\s*years',  # "5+ years" or "5 years"
-        r'(\d+)\s*to\s*(\d+)\s*years',  # "5 to 7 years"
-        r'(\d+)\s*-\s*(\d+)\s*years',  # "5-7 years"
+        r'(\d+)\+\s*years',
+        r'(\d+)\s*years',
+        r'(\d+)\s*to\s*(\d+)\s*years',
+        r'(\d+)\s*-\s*(\d+)\s*years',
     ]
     
     for pattern in patterns:
         matches = re.findall(pattern, text_lower)
         for match in matches:
-            # Handle different match types
             if isinstance(match, tuple):
-                # Range like "5-7 years"
                 years = [int(m) for m in match if m.isdigit()]
                 min_years = min(years) if years else 0
             else:
-                # Single number like "5+ years"
                 min_years = int(match) if match.isdigit() else 0
             
-            # Reject if minimum required is 4+
             if min_years >= 4:
                 return True, f"{min_years}+ years required"
     
-    # Also check for explicit senior language
+    # Explicit senior experience phrases
     senior_exp_phrases = [
-        '5+ years',
-        '6+ years',
-        '7+ years',
-        '8+ years',
-        '10+ years',
-        'minimum 4 years',
-        'minimum 5 years',
-        'at least 4 years',
-        'at least 5 years',
-        'extensive experience',
-        'significant experience',
-        'seasoned engineer',
-        'veteran engineer'
+        '5+ years', '6+ years', '7+ years', '8+ years', '10+ years',
+        'minimum 4 years', 'minimum 5 years',
+        'at least 4 years', 'at least 5 years',
+        'extensive experience', 'significant experience',
+        'seasoned engineer', 'veteran engineer'
     ]
     
     for phrase in senior_exp_phrases:
@@ -217,16 +205,16 @@ def requires_too_much_experience(text):
             return True, phrase
     
     return False, None
-# ==================== JOB SOURCES ====================
+
+# ==================== API SOURCE 1: JSearch ====================
 
 def fetch_jsearch_jobs():
     """JSearch API - Aggregates Google Jobs, LinkedIn, ZipRecruiter"""
     if not JSEARCH_API_KEY:
-        print("⚠️  JSearch API key not found")
+        print("⚠️  JSearch API key not found - skipping")
         return []
     
     jobs = []
-    
     print("📥 Fetching from JSearch API...")
     
     url = "https://jsearch.p.rapidapi.com/search"
@@ -235,7 +223,8 @@ def fetch_jsearch_jobs():
         "X-RapidAPI-Host": "jsearch.p.rapidapi.com"
     }
     
-    for query in SEARCH_QUERIES:
+    # Limit to 3 queries to save API calls (150/month free tier)
+    for query in SEARCH_QUERIES[:3]:
         try:
             params = {
                 "query": f"{query} United States",
@@ -243,13 +232,12 @@ def fetch_jsearch_jobs():
                 "num_pages": "1",
                 "date_posted": "today",
                 "employment_types": "FULLTIME"
-                # REMOVED: job_requirements filter (let Claude decide)
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=15)
             
             if response.status_code != 200:
-                print(f"  ⚠️ JSearch returned {response.status_code} for '{query}'")
+                print(f"  ⚠️ JSearch returned {response.status_code}")
                 continue
             
             data = response.json()
@@ -259,42 +247,33 @@ def fetch_jsearch_jobs():
                 title = job.get('job_title', '')
                 description = job.get('job_description', '')
                 job_url = job.get('job_apply_link', '')
-                location = job.get('job_city', '') + ', ' + job.get('job_state', '')
+                location = f"{job.get('job_city', '')} {job.get('job_state', '')} {job.get('job_country', '')}"
                 
-                # Skip if no URL
                 if not job_url or not job_url.startswith('http'):
                     continue
                 
-                # STRICT USA check
-                full_location = location + ' ' + job.get('job_country', '')
-                if not is_usa_only(full_location):
+                if not is_usa_only(location):
                     continue
                 
-                # Government check
                 if is_government(company):
                     continue
                 
-                # Clearly senior check
                 if is_clearly_senior(title):
                     continue
                 
                 is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
                 if is_not_ft:
-                    print(f"  ⛔ {company} - not full-time: {reason}")
-                    continue
-                # Hard visa blockers
-                has_blocker, blocker = has_hard_blocker(title + ' ' + description)
-                if has_blocker:
-                    print(f"  ⛔ {company} - {blocker}")
                     continue
                 
-
+                has_blocker, blocker = has_hard_blocker(title + ' ' + description)
+                if has_blocker:
+                    continue
+                
                 too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
                 if too_much_exp:
-                    print(f"  ⛔ {company} - {reason}")
                     continue
+                
                 print(f"  ✅ {company} - {title}")
-
                 
                 job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
                 
@@ -309,19 +288,185 @@ def fetch_jsearch_jobs():
                     'status': 'Raw'
                 })
             
-            time.sleep(1)  # Rate limiting
+            time.sleep(1)
             
         except Exception as e:
-            print(f"  ❌ Query '{query}' failed: {e}")
+            print(f"  ❌ JSearch query failed: {e}")
             continue
     
     print(f"  ✅ {len(jobs)} jobs from JSearch")
     return jobs
 
+# ==================== API SOURCE 2: Adzuna ====================
+
+def fetch_adzuna_jobs():
+    """Adzuna API - Aggregates Indeed, Monster, CareerBuilder"""
+    if not ADZUNA_APP_ID or not ADZUNA_API_KEY:
+        print("⚠️  Adzuna API credentials not found - skipping")
+        return []
+    
+    jobs = []
+    print("📥 Fetching from Adzuna API...")
+    
+    for query in SEARCH_QUERIES:
+        try:
+            url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
+            
+            params = {
+                'app_id': ADZUNA_APP_ID,
+                'app_key': ADZUNA_API_KEY,
+                'results_per_page': 20,
+                'what': query,
+                'where': 'USA',
+                'max_days_old': 1,
+                'sort_by': 'date'
+            }
+            
+            response = requests.get(url, params=params, timeout=15)
+            
+            if response.status_code != 200:
+                print(f"  ⚠️ Adzuna returned {response.status_code}")
+                continue
+            
+            data = response.json()
+            
+            for job in data.get('results', []):
+                company_obj = job.get('company', {})
+                company = company_obj.get('display_name', 'Unknown')
+                title = job.get('title', '')
+                description = job.get('description', '')
+                job_url = job.get('redirect_url', '')
+                location_obj = job.get('location', {})
+                location = location_obj.get('display_name', '')
+                
+                if not job_url or not job_url.startswith('http'):
+                    continue
+                
+                if not is_usa_only(location):
+                    continue
+                
+                if is_government(company):
+                    continue
+                
+                if is_clearly_senior(title):
+                    continue
+                
+                is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
+                if is_not_ft:
+                    continue
+                
+                has_blocker, blocker = has_hard_blocker(title + ' ' + description)
+                if has_blocker:
+                    continue
+                
+                too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
+                if too_much_exp:
+                    continue
+                
+                print(f"  ✅ {company} - {title}")
+                
+                job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
+                
+                jobs.append({
+                    'job_id': job_id,
+                    'company': company,
+                    'title': title,
+                    'description': description[:3000],
+                    'url': job_url,
+                    'source': 'Adzuna',
+                    'date_found': datetime.now().strftime('%Y-%m-%d'),
+                    'status': 'Raw'
+                })
+            
+            time.sleep(1)
+            
+        except Exception as e:
+            print(f"  ❌ Adzuna query failed: {e}")
+            continue
+    
+    print(f"  ✅ {len(jobs)} jobs from Adzuna")
+    return jobs
+
+# ==================== API SOURCE 3: The Muse ====================
+
+def fetch_themuse_jobs():
+    """The Muse API - Tech-focused, curated companies"""
+    jobs = []
+    print("📥 Fetching from The Muse API...")
+    
+    try:
+        url = "https://www.themuse.com/api/public/jobs"
+        
+        params = {
+            'level': 'Entry Level',
+            'category': 'Software Engineering',
+            'location': 'Flexible / Remote',
+            'page': 1,
+            'descending': 'true',
+            'api_key': 'public'
+        }
+        
+        response = requests.get(url, params=params, timeout=15)
+        
+        if response.status_code != 200:
+            print(f"  ⚠️ The Muse returned {response.status_code}")
+            return jobs
+        
+        data = response.json()
+        
+        for job in data.get('results', [])[:30]:
+            company_obj = job.get('company', {})
+            company = company_obj.get('name', 'Unknown')
+            title = job.get('name', '')
+            description = job.get('contents', '') or job.get('description', '')
+            job_url = job.get('refs', {}).get('landing_page', '')
+            
+            locations = job.get('locations', [])
+            location = locations[0].get('name', '') if locations else ''
+            
+            if not job_url or not job_url.startswith('http'):
+                continue
+            
+            if location and not is_usa_only(location):
+                continue
+            
+            if is_government(company):
+                continue
+            
+            if is_clearly_senior(title):
+                continue
+            
+            has_blocker, blocker = has_hard_blocker(title + ' ' + description)
+            if has_blocker:
+                continue
+            
+            print(f"  ✅ {company} - {title}")
+            
+            job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
+            
+            jobs.append({
+                'job_id': job_id,
+                'company': company,
+                'title': title,
+                'description': description[:3000],
+                'url': job_url,
+                'source': 'TheMuse',
+                'date_found': datetime.now().strftime('%Y-%m-%d'),
+                'status': 'Raw'
+            })
+        
+        print(f"  ✅ {len(jobs)} jobs from The Muse")
+        
+    except Exception as e:
+        print(f"  ❌ The Muse error: {e}")
+    
+    return jobs
+
+# ==================== API SOURCE 4: Greenhouse ====================
+
 def fetch_greenhouse_jobs():
     """Greenhouse company boards"""
     jobs = []
-    
     print("📥 Fetching from Greenhouse...")
     
     for company_id in GREENHOUSE_COMPANIES:
@@ -338,27 +483,13 @@ def fetch_greenhouse_jobs():
                 title = job.get('title', '')
                 job_url = job.get('absolute_url', '')
                 location = job.get('location', {}).get('name', '')
-                company = job.get('employer_name', 'Unknown')
-                description = job.get('job_description', '')
                 
-                # STRICT USA check
                 if not is_usa_only(location):
                     continue
                 
-                # Clearly senior check
                 if is_clearly_senior(title):
                     continue
-
-                is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
-                if is_not_ft:
-                    print(f"  ⛔ {company} - not full-time: {reason}")
-                    continue
                 
-
-                too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
-                if too_much_exp:
-                    print(f"  ⛔ {company} - {reason}")
-                    continue
                 print(f"  ✅ {company_id.title()} - {title}")
                 
                 job_id = hashlib.md5(f"{company_id}{title}{job_url}".encode()).hexdigest()[:8]
@@ -382,10 +513,11 @@ def fetch_greenhouse_jobs():
     print(f"  ✅ {len(jobs)} jobs from Greenhouse")
     return jobs
 
+# ==================== API SOURCE 5: Lever ====================
+
 def fetch_lever_jobs():
     """Lever company boards"""
     jobs = []
-    
     print("📥 Fetching from Lever...")
     
     for company_id in LEVER_COMPANIES:
@@ -402,24 +534,11 @@ def fetch_lever_jobs():
                 title = job.get('text', '')
                 job_url = job.get('hostedUrl', '')
                 location = job.get('categories', {}).get('location', '')
-                company = job.get('employer_name', 'Unknown')
-                description = job.get('job_description', '')
                 
-                # STRICT USA check
                 if not is_usa_only(location):
                     continue
                 
-                # Clearly senior check
                 if is_clearly_senior(title):
-                    continue
-                is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
-                if is_not_ft:
-                    print(f"  ⛔ {company} - not full-time: {reason}")
-                    continue
-
-                too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
-                if too_much_exp:
-                    print(f"  ⛔ {company} - {reason}")
                     continue
                 
                 print(f"  ✅ {company_id.title()} - {title}")
@@ -445,10 +564,11 @@ def fetch_lever_jobs():
     print(f"  ✅ {len(jobs)} jobs from Lever")
     return jobs
 
+# ==================== API SOURCE 6: SimplifyJobs ====================
+
 def fetch_simplify_github():
     """SimplifyJobs curated list"""
     jobs = []
-    
     print("📥 Fetching from SimplifyJobs GitHub...")
     
     try:
@@ -460,35 +580,24 @@ def fetch_simplify_github():
         
         data = response.json()
         
-        for job in data[:50]:  # Limit to 50 most recent
+        for job in data[:50]:
             company = job.get('company_name', '')
             title = job.get('title', '')
             locations = job.get('locations', [])
             job_url = job.get('url', '')
             active = job.get('active', True)
-            description = job.get('job_description', '')
             
             if not active or not job_url:
                 continue
             
-            # STRICT USA check
             location_str = ' '.join(locations) if isinstance(locations, list) else str(locations)
             if not is_usa_only(location_str):
                 continue
             
-            # Government check
             if is_government(company):
                 continue
             
-            is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
-            if is_not_ft:
-                print(f"  ⛔ {company} - not full-time: {reason}")
-                continue
             print(f"  ✅ {company} - {title}")
-            too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
-            if too_much_exp:
-                print(f"  ⛔ {company} - {reason}")
-                continue
             
             job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
             
@@ -513,7 +622,7 @@ def fetch_simplify_github():
 # ==================== MAIN ====================
 
 def save_to_sheets(jobs):
-    """Save to Google Sheets"""
+    """Save to Google Sheets with deduplication"""
     from sheets_helper import get_sheet
     
     if not jobs:
@@ -555,32 +664,50 @@ def save_to_sheets(jobs):
 
 def main():
     print("=" * 80)
-    print("🎯 NEW GRAD JOB HUNTER - Fixed Edition")
+    print("🎯 NEW GRAD JOB HUNTER - Multi-API Edition")
     print("=" * 80)
     print("Sources:")
-    print("  • JSearch API (Google Jobs, LinkedIn, ZipRecruiter)")
+    print("  • JSearch (Google Jobs, LinkedIn, ZipRecruiter)")
+    print("  • Adzuna (Indeed, Monster, CareerBuilder)")
+    print("  • The Muse (Curated tech companies)")
     print("  • Greenhouse (Top tech companies)")
     print("  • Lever (Startups)")
     print("  • SimplifyJobs (Curated new grad list)")
-    print("\nFiltering:")
-    print("  • STRICT USA-only (no Canada, no ambiguous 'Remote')")
-    print("  • Minimal seniority filter (only obvious senior roles)")
-    print("  • Hard visa blockers (citizenship, clearance, no sponsorship)")
-    print("  • Claude handles employment type & skill matching")
+    print("\nFilters:")
+    print("  • STRICT USA-only")
+    print("  • Max 3 years experience")
+    print("  • Full-time only")
+    print("  • No citizenship/clearance requirements")
     print("=" * 80)
     
     all_jobs = []
     
-    # Fetch from all sources
+    # Fetch from ALL sources
     all_jobs.extend(fetch_jsearch_jobs())
+    all_jobs.extend(fetch_adzuna_jobs())
+    all_jobs.extend(fetch_themuse_jobs())
     all_jobs.extend(fetch_greenhouse_jobs())
     all_jobs.extend(fetch_lever_jobs())
     all_jobs.extend(fetch_simplify_github())
     
     print(f"\n📊 Total jobs collected: {len(all_jobs)}")
     
+    # Remove duplicates across sources
+    unique_jobs = {}
+    for job in all_jobs:
+        key = f"{job['company']}{job['title']}"
+        if key not in unique_jobs:
+            unique_jobs[key] = job
+    
+    deduped_jobs = list(unique_jobs.values())
+    duplicates = len(all_jobs) - len(deduped_jobs)
+    
+    if duplicates > 0:
+        print(f"📊 Removed {duplicates} duplicates across sources")
+        print(f"📊 Unique jobs: {len(deduped_jobs)}")
+    
     # Save
-    new_count = save_to_sheets(all_jobs)
+    new_count = save_to_sheets(deduped_jobs)
     
     print("\n" + "=" * 80)
     print("✅ SCRAPING COMPLETE")
