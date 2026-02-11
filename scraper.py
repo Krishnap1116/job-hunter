@@ -164,6 +164,59 @@ def is_obviously_not_fulltime(text):
             return True, term
     
     return False, None
+
+def requires_too_much_experience(text):
+    """Reject jobs clearly requiring 4+ years experience"""
+    text_lower = text.lower()
+    
+    # Pattern: "X+ years" or "X years" where X >= 4
+    import re
+    
+    # Find patterns like "5+ years", "4 years", "6-8 years"
+    patterns = [
+        r'(\d+)\+?\s*years',  # "5+ years" or "5 years"
+        r'(\d+)\s*to\s*(\d+)\s*years',  # "5 to 7 years"
+        r'(\d+)\s*-\s*(\d+)\s*years',  # "5-7 years"
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, text_lower)
+        for match in matches:
+            # Handle different match types
+            if isinstance(match, tuple):
+                # Range like "5-7 years"
+                years = [int(m) for m in match if m.isdigit()]
+                min_years = min(years) if years else 0
+            else:
+                # Single number like "5+ years"
+                min_years = int(match) if match.isdigit() else 0
+            
+            # Reject if minimum required is 4+
+            if min_years >= 4:
+                return True, f"{min_years}+ years required"
+    
+    # Also check for explicit senior language
+    senior_exp_phrases = [
+        '5+ years',
+        '6+ years',
+        '7+ years',
+        '8+ years',
+        '10+ years',
+        'minimum 4 years',
+        'minimum 5 years',
+        'at least 4 years',
+        'at least 5 years',
+        'extensive experience',
+        'significant experience',
+        'seasoned engineer',
+        'veteran engineer'
+    ]
+    
+    for phrase in senior_exp_phrases:
+        if phrase in text_lower:
+            return True, phrase
+    
+    return False, None
 # ==================== JOB SOURCES ====================
 
 def fetch_jsearch_jobs():
@@ -235,7 +288,13 @@ def fetch_jsearch_jobs():
                     print(f"  ⛔ {company} - {blocker}")
                     continue
                 
+
+                too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
+                if too_much_exp:
+                    print(f"  ⛔ {company} - {reason}")
+                    continue
                 print(f"  ✅ {company} - {title}")
+
                 
                 job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
                 
@@ -279,6 +338,8 @@ def fetch_greenhouse_jobs():
                 title = job.get('title', '')
                 job_url = job.get('absolute_url', '')
                 location = job.get('location', {}).get('name', '')
+                company = job.get('employer_name', 'Unknown')
+                description = job.get('job_description', '')
                 
                 # STRICT USA check
                 if not is_usa_only(location):
@@ -293,6 +354,11 @@ def fetch_greenhouse_jobs():
                     print(f"  ⛔ {company} - not full-time: {reason}")
                     continue
                 
+
+                too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
+                if too_much_exp:
+                    print(f"  ⛔ {company} - {reason}")
+                    continue
                 print(f"  ✅ {company_id.title()} - {title}")
                 
                 job_id = hashlib.md5(f"{company_id}{title}{job_url}".encode()).hexdigest()[:8]
@@ -336,6 +402,8 @@ def fetch_lever_jobs():
                 title = job.get('text', '')
                 job_url = job.get('hostedUrl', '')
                 location = job.get('categories', {}).get('location', '')
+                company = job.get('employer_name', 'Unknown')
+                description = job.get('job_description', '')
                 
                 # STRICT USA check
                 if not is_usa_only(location):
@@ -349,7 +417,10 @@ def fetch_lever_jobs():
                     print(f"  ⛔ {company} - not full-time: {reason}")
                     continue
 
-
+                too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
+                if too_much_exp:
+                    print(f"  ⛔ {company} - {reason}")
+                    continue
                 
                 print(f"  ✅ {company_id.title()} - {title}")
                 
@@ -395,6 +466,7 @@ def fetch_simplify_github():
             locations = job.get('locations', [])
             job_url = job.get('url', '')
             active = job.get('active', True)
+            description = job.get('job_description', '')
             
             if not active or not job_url:
                 continue
@@ -413,6 +485,10 @@ def fetch_simplify_github():
                 print(f"  ⛔ {company} - not full-time: {reason}")
                 continue
             print(f"  ✅ {company} - {title}")
+            too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
+            if too_much_exp:
+                print(f"  ⛔ {company} - {reason}")
+                continue
             
             job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
             
