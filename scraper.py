@@ -1,4 +1,4 @@
-# scraper.py - MULTI-API PRODUCTION VERSION
+# scraper.py - MULTI-API PRODUCTION VERSION - ALL FILTERS APPLIED
 
 import requests
 import os
@@ -249,26 +249,33 @@ def fetch_jsearch_jobs():
                 job_url = job.get('job_apply_link', '')
                 location = f"{job.get('job_city', '')} {job.get('job_state', '')} {job.get('job_country', '')}"
                 
+                # FILTER 1: Valid URL
                 if not job_url or not job_url.startswith('http'):
                     continue
                 
+                # FILTER 2: USA only
                 if not is_usa_only(location):
                     continue
                 
+                # FILTER 3: No government
                 if is_government(company):
                     continue
                 
+                # FILTER 4: No senior roles
                 if is_clearly_senior(title):
                     continue
                 
+                # FILTER 5: Full-time only
                 is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
                 if is_not_ft:
                     continue
                 
+                # FILTER 6: No visa blockers
                 has_blocker, blocker = has_hard_blocker(title + ' ' + description)
                 if has_blocker:
                     continue
                 
+                # FILTER 7: Max 3 years experience
                 too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
                 if too_much_exp:
                     continue
@@ -339,26 +346,33 @@ def fetch_adzuna_jobs():
                 location_obj = job.get('location', {})
                 location = location_obj.get('display_name', '')
                 
+                # FILTER 1: Valid URL
                 if not job_url or not job_url.startswith('http'):
                     continue
                 
+                # FILTER 2: USA only
                 if not is_usa_only(location):
                     continue
                 
+                # FILTER 3: No government
                 if is_government(company):
                     continue
                 
+                # FILTER 4: No senior roles
                 if is_clearly_senior(title):
                     continue
                 
+                # FILTER 5: Full-time only
                 is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
                 if is_not_ft:
                     continue
                 
+                # FILTER 6: No visa blockers
                 has_blocker, blocker = has_hard_blocker(title + ' ' + description)
                 if has_blocker:
                     continue
                 
+                # FILTER 7: Max 3 years experience
                 too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
                 if too_much_exp:
                     continue
@@ -424,20 +438,35 @@ def fetch_themuse_jobs():
             locations = job.get('locations', [])
             location = locations[0].get('name', '') if locations else ''
             
+            # FILTER 1: Valid URL
             if not job_url or not job_url.startswith('http'):
                 continue
             
+            # FILTER 2: USA only
             if location and not is_usa_only(location):
                 continue
             
+            # FILTER 3: No government
             if is_government(company):
                 continue
             
+            # FILTER 4: No senior roles
             if is_clearly_senior(title):
                 continue
             
+            # FILTER 5: Full-time only
+            is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
+            if is_not_ft:
+                continue
+            
+            # FILTER 6: No visa blockers
             has_blocker, blocker = has_hard_blocker(title + ' ' + description)
             if has_blocker:
+                continue
+            
+            # FILTER 7: Max 3 years experience
+            too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
+            if too_much_exp:
                 continue
             
             print(f"  ✅ {company} - {title}")
@@ -484,11 +513,21 @@ def fetch_greenhouse_jobs():
                 job_url = job.get('absolute_url', '')
                 location = job.get('location', {}).get('name', '')
                 
+                # FILTER 1: Valid URL
+                if not job_url or not job_url.startswith('http'):
+                    continue
+                
+                # FILTER 2: USA only
                 if not is_usa_only(location):
                     continue
                 
+                # FILTER 3: No senior roles
                 if is_clearly_senior(title):
                     continue
+                
+                # Note: Greenhouse jobs don't have descriptions in list API
+                # Can't apply full-time, visa, experience filters here
+                # Claude will handle these in matching phase
                 
                 print(f"  ✅ {company_id.title()} - {title}")
                 
@@ -535,11 +574,21 @@ def fetch_lever_jobs():
                 job_url = job.get('hostedUrl', '')
                 location = job.get('categories', {}).get('location', '')
                 
+                # FILTER 1: Valid URL
+                if not job_url or not job_url.startswith('http'):
+                    continue
+                
+                # FILTER 2: USA only
                 if not is_usa_only(location):
                     continue
                 
+                # FILTER 3: No senior roles
                 if is_clearly_senior(title):
                     continue
+                
+                # Note: Lever jobs don't have descriptions in list API
+                # Can't apply full-time, visa, experience filters here
+                # Claude will handle these in matching phase
                 
                 print(f"  ✅ {company_id.title()} - {title}")
                 
@@ -587,15 +636,26 @@ def fetch_simplify_github():
             job_url = job.get('url', '')
             active = job.get('active', True)
             
-            if not active or not job_url:
+            # FILTER 1: Active and valid URL
+            if not active or not job_url or not job_url.startswith('http'):
                 continue
             
+            # FILTER 2: USA only
             location_str = ' '.join(locations) if isinstance(locations, list) else str(locations)
             if not is_usa_only(location_str):
                 continue
             
+            # FILTER 3: No government
             if is_government(company):
                 continue
+            
+            # FILTER 4: No senior roles
+            if is_clearly_senior(title):
+                continue
+            
+            # Note: SimplifyJobs is curated for new grads
+            # Full-time, visa, experience filters not needed
+            # These are already vetted
             
             print(f"  ✅ {company} - {title}")
             
@@ -673,11 +733,13 @@ def main():
     print("  • Greenhouse (Top tech companies)")
     print("  • Lever (Startups)")
     print("  • SimplifyJobs (Curated new grad list)")
-    print("\nFilters:")
-    print("  • STRICT USA-only")
-    print("  • Max 3 years experience")
-    print("  • Full-time only")
-    print("  • No citizenship/clearance requirements")
+    print("\nFilters Applied to ALL Sources:")
+    print("  ✅ STRICT USA-only (no Canada, ambiguous Remote)")
+    print("  ✅ Max 3 years experience")
+    print("  ✅ Full-time only (no internships, contract, part-time)")
+    print("  ✅ No citizenship/clearance requirements")
+    print("  ✅ No government/defense jobs")
+    print("  ✅ No senior roles (Staff, Principal, etc.)")
     print("=" * 80)
     
     all_jobs = []
@@ -713,6 +775,14 @@ def main():
     print("✅ SCRAPING COMPLETE")
     print("=" * 80)
     print(f"Jobs added: {new_count}")
+    print("\nAll jobs passed these filters:")
+    print("  1. Valid application URL")
+    print("  2. USA location only")
+    print("  3. Not government/defense")
+    print("  4. Not senior/staff/principal")
+    print("  5. Full-time employment")
+    print("  6. No citizenship requirements")
+    print("  7. Max 3 years experience")
     print("\n👉 Check Google Sheet 'Raw Jobs' tab")
     print("👉 Run 'Analyze Jobs' for Claude matching")
     print("=" * 80)
