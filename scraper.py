@@ -1,11 +1,13 @@
-# scraper.py - MULTI-API PRODUCTION VERSION - ALL FILTERS APPLIED
+# scraper.py - EXPERT MULTI-SOURCE JOB SCRAPER
 
 import requests
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import time
 import re
+import feedparser
+from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
@@ -13,209 +15,101 @@ JSEARCH_API_KEY = os.getenv("JSEARCH_API_KEY")
 ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
 ADZUNA_API_KEY = os.getenv("ADZUNA_API_KEY")
 
-# Broader queries (let Claude filter)
 SEARCH_QUERIES = [
     "software engineer",
     "machine learning engineer",
     "AI engineer",
     "backend engineer",
     "full stack engineer",
-    "data engineer",
-    "ML engineer"
+    "data engineer"
 ]
 
 GREENHOUSE_COMPANIES = [
     'stripe', 'ramp', 'notion', 'figma', 'anthropic', 
     'scale', 'discord', 'airtable', 'brex', 'openai',
-    'databricks', 'snowflake', 'confluent'
+    'databricks', 'snowflake', 'confluent', 'coinbase',
+    'robinhood', 'chime', 'square', 'affirm', 'reddit',
+    'pinterest', 'snap', 'dropbox', 'airbnb', 'doordash'
 ]
 
 LEVER_COMPANIES = [
     'rippling', 'plaid', 'retool', 'verkada', 'faire',
-    'superhuman', 'loom', 'mux'
+    'superhuman', 'loom', 'mux', 'gusto', 'lattice',
+    'vanta', 'merge', 'ramp', 'census', 'dbt'
 ]
 
-# Hard blockers (reject during scraping)
-VISA_BLOCKERS = [
-    'us citizen only',
-    'u.s. citizen only',
-    'citizenship required',
-    'security clearance required',
-    'active clearance',
-    'no visa sponsorship',
-    'cannot sponsor',
-    'will not sponsor',
-    'must be authorized to work without sponsorship'
-]
+RSS_FEEDS = {
+    'remotive': 'https://remotive.com/api/remote-jobs',
+    'weworkremotely': 'https://weworkremotely.com/remote-jobs.rss',
+}
 
-# Seniority exclusions (MINIMAL - only obvious senior)
-SENIOR_KEYWORDS = [
-    'staff engineer',
-    'principal engineer',
-    'senior manager',
-    'engineering manager',
-    'director of',
-    'vp of',
-    'vice president',
-    'head of engineering',
-    'chief',
-    'lead engineer'
-]
+# ==================== MINIMAL HELPER FUNCTIONS ====================
 
-# ==================== HELPER FUNCTIONS ====================
-
-def is_usa_only(location_text):
-    """STRICT USA-only check"""
-    if not location_text:
+def is_usa_location(location):
+    """STRICT USA-only check - uses structured data"""
+    if not location:
         return False
     
-    location_lower = location_text.lower()
+    location_lower = location.lower()
     
-    # REJECT if mentions other countries
+    # REJECT other countries
     reject_countries = [
-        'canada', 'toronto', 'vancouver', 'montreal', 'ottawa',
-        'uk', 'united kingdom', 'london', 'england',
-        'india', 'bangalore', 'mumbai', 'hyderabad', 'pune',
-        'europe', 'germany', 'france', 'spain', 'netherlands',
-        'australia', 'sydney', 'melbourne',
-        'mexico', 'brazil', 'argentina',
-        'china', 'japan', 'singapore', 'korea'
+        'canada', 'toronto', 'vancouver', 'montreal',
+        'uk', 'london', 'india', 'bangalore', 'mumbai',
+        'europe', 'germany', 'france', 'australia',
+        'mexico', 'brazil', 'china', 'japan', 'singapore'
     ]
     
-    for country in reject_countries:
-        if country in location_lower:
-            return False
+    if any(country in location_lower for country in reject_countries):
+        return False
     
-    # ACCEPT only if explicitly USA
+    # ACCEPT USA
     usa_indicators = [
         'united states', 'usa', 'u.s.', 'us,',
-        # States
         'california', 'new york', 'texas', 'florida', 'washington',
         'massachusetts', 'illinois', 'colorado', 'oregon', 'georgia',
-        # Cities
-        'san francisco', 'nyc', 'seattle', 'austin', 'boston',
-        'chicago', 'denver', 'los angeles', 'atlanta', 'portland',
-        # Remote USA
-        'remote us', 'remote usa', 'remote - us', 'remote (us)',
-        'us remote', 'united states remote'
+        'san francisco', 'seattle', 'austin', 'boston', 'chicago',
+        'remote us', 'remote usa', 'remote - us', 'remote (us)'
     ]
     
-    for indicator in usa_indicators:
-        if indicator in location_lower:
-            return True
-    
-    # If just "Remote" with no country, REJECT (ambiguous)
-    if location_lower.strip() in ['remote', 'remote work', 'work from home']:
-        return False
-    
-    return False
+    return any(indicator in location_lower for indicator in usa_indicators)
 
-def has_hard_blocker(text):
-    """Check for citizenship/clearance requirements"""
-    text_lower = text.lower()
-    for blocker in VISA_BLOCKERS:
-        if blocker in text_lower:
-            return True, blocker
-    return False, None
+def is_recent(date_str, hours=24):
+    """Check if posted in last 24 hours (STRICT)"""
+    if not date_str:
+        return True  # If no date, include it (we'll filter in Claude)
+    
+    try:
+        formats = [
+            '%Y-%m-%dT%H:%M:%SZ',
+            '%Y-%m-%dT%H:%M:%S.%fZ',
+            '%Y-%m-%dT%H:%M:%S',
+            '%Y-%m-%d',
+            '%a, %d %b %Y %H:%M:%S %Z'
+        ]
+        
+        for fmt in formats:
+            try:
+                posted = datetime.strptime(date_str.strip(), fmt)
+                hours_ago = (datetime.utcnow() - posted).total_seconds() / 3600
+                return hours_ago <= hours  # 24 hours
+            except:
+                continue
+        
+        return True  # If can't parse, let Claude decide
+    except:
+        return True
 
-def is_clearly_senior(title):
-    """Only reject OBVIOUSLY senior roles"""
-    title_lower = title.lower()
-    
-    for keyword in SENIOR_KEYWORDS:
-        if title_lower.startswith(keyword) or f" {keyword}" in title_lower:
-            return True
-    
-    return False
-
-def is_government(company):
-    """Reject government/defense contractors"""
-    company_lower = company.lower()
-    gov_keywords = [
-        'department of', 'federal', 'government', 'dept of',
-        'raytheon', 'lockheed', 'northrop', 'booz allen',
-        'leidos', 'general dynamics', 'l3harris', 'saic',
-        'mitre', 'aerospace corporation'
-    ]
-    return any(kw in company_lower for kw in gov_keywords)
-
-def is_obviously_not_fulltime(text):
-    """Only reject OBVIOUS non-full-time roles"""
-    text_lower = text.lower()
-    
-    hard_rejects = [
-        'internship',
-        'intern ',
-        ' intern',
-        'part-time',
-        'part time',
-        'freelance',
-        'freelancer',
-        '1099',
-        'hourly contract',
-        'temporary position',
-        'seasonal',
-        'consultant position',
-        'consulting role',
-        'project-based',
-        'gig work'
-    ]
-    
-    for term in hard_rejects:
-        if term in text_lower:
-            return True, term
-    
-    return False, None
-
-def requires_too_much_experience(text):
-    """Reject jobs clearly requiring 4+ years experience"""
-    text_lower = text.lower()
-    
-    # Find patterns like "5+ years", "4 years", "6-8 years"
-    patterns = [
-        r'(\d+)\+\s*years',
-        r'(\d+)\s*years',
-        r'(\d+)\s*to\s*(\d+)\s*years',
-        r'(\d+)\s*-\s*(\d+)\s*years',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, text_lower)
-        for match in matches:
-            if isinstance(match, tuple):
-                years = [int(m) for m in match if m.isdigit()]
-                min_years = min(years) if years else 0
-            else:
-                min_years = int(match) if match.isdigit() else 0
-            
-            if min_years >= 4:
-                return True, f"{min_years}+ years required"
-    
-    # Explicit senior experience phrases
-    senior_exp_phrases = [
-        '5+ years', '6+ years', '7+ years', '8+ years', '10+ years',
-        'minimum 4 years', 'minimum 5 years',
-        'at least 4 years', 'at least 5 years',
-        'extensive experience', 'significant experience',
-        'seasoned engineer', 'veteran engineer'
-    ]
-    
-    for phrase in senior_exp_phrases:
-        if phrase in text_lower:
-            return True, phrase
-    
-    return False, None
-
-# ==================== API SOURCE 1: JSearch ====================
+# ==================== LAYER 1: FREE APIs ====================
 
 def fetch_jsearch_jobs():
-    """JSearch API - Aggregates Google Jobs, LinkedIn, ZipRecruiter"""
+    """JSearch API - FREE 150 calls/month"""
     if not JSEARCH_API_KEY:
-        print("⚠️  JSearch API key not found - skipping")
+        print("⚠️  JSearch API key not found")
         return []
     
     jobs = []
-    print("📥 Fetching from JSearch API...")
+    print("📥 JSearch API...")
     
     url = "https://jsearch.p.rapidapi.com/search"
     headers = {
@@ -223,13 +117,12 @@ def fetch_jsearch_jobs():
         "X-RapidAPI-Host": "jsearch.p.rapidapi.com"
     }
     
-    # Limit to 3 queries to save API calls (150/month free tier)
+    # Use 3 queries to stay in free tier
     for query in SEARCH_QUERIES[:3]:
         try:
             params = {
                 "query": f"{query} United States",
                 "page": "1",
-                "num_pages": "1",
                 "date_posted": "today",
                 "employment_types": "FULLTIME"
             }
@@ -237,47 +130,19 @@ def fetch_jsearch_jobs():
             response = requests.get(url, headers=headers, params=params, timeout=15)
             
             if response.status_code != 200:
-                print(f"  ⚠️ JSearch returned {response.status_code}")
                 continue
             
-            data = response.json()
-            
-            for job in data.get('data', []):
+            for job in response.json().get('data', []):
                 company = job.get('employer_name', 'Unknown')
                 title = job.get('job_title', '')
                 description = job.get('job_description', '')
                 job_url = job.get('job_apply_link', '')
                 location = f"{job.get('job_city', '')} {job.get('job_state', '')} {job.get('job_country', '')}"
                 
-                # FILTER 1: Valid URL
+                # ONLY 2 FILTERS: Valid URL + USA
                 if not job_url or not job_url.startswith('http'):
                     continue
-                
-                # FILTER 2: USA only
-                if not is_usa_only(location):
-                    continue
-                
-                # FILTER 3: No government
-                if is_government(company):
-                    continue
-                
-                # FILTER 4: No senior roles
-                if is_clearly_senior(title):
-                    continue
-                
-                # FILTER 5: Full-time only
-                is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
-                if is_not_ft:
-                    continue
-                
-                # FILTER 6: No visa blockers
-                has_blocker, blocker = has_hard_blocker(title + ' ' + description)
-                if has_blocker:
-                    continue
-                
-                # FILTER 7: Max 3 years experience
-                too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
-                if too_much_exp:
+                if not is_usa_location(location):
                     continue
                 
                 print(f"  ✅ {company} - {title}")
@@ -290,6 +155,7 @@ def fetch_jsearch_jobs():
                     'title': title,
                     'description': description[:3000],
                     'url': job_url,
+                    'location': location,
                     'source': 'JSearch',
                     'date_found': datetime.now().strftime('%Y-%m-%d'),
                     'status': 'Raw'
@@ -298,22 +164,19 @@ def fetch_jsearch_jobs():
             time.sleep(1)
             
         except Exception as e:
-            print(f"  ❌ JSearch query failed: {e}")
-            continue
+            print(f"  ❌ {query}: {e}")
     
     print(f"  ✅ {len(jobs)} jobs from JSearch")
     return jobs
 
-# ==================== API SOURCE 2: Adzuna ====================
-
 def fetch_adzuna_jobs():
-    """Adzuna API - Aggregates Indeed, Monster, CareerBuilder"""
+    """Adzuna API - FREE 5000 calls/month"""
     if not ADZUNA_APP_ID or not ADZUNA_API_KEY:
-        print("⚠️  Adzuna API credentials not found - skipping")
+        print("⚠️  Adzuna API credentials not found")
         return []
     
     jobs = []
-    print("📥 Fetching from Adzuna API...")
+    print("📥 Adzuna API...")
     
     for query in SEARCH_QUERIES:
         try:
@@ -322,7 +185,7 @@ def fetch_adzuna_jobs():
             params = {
                 'app_id': ADZUNA_APP_ID,
                 'app_key': ADZUNA_API_KEY,
-                'results_per_page': 20,
+                'results_per_page': 50,
                 'what': query,
                 'where': 'USA',
                 'max_days_old': 1,
@@ -332,49 +195,22 @@ def fetch_adzuna_jobs():
             response = requests.get(url, params=params, timeout=15)
             
             if response.status_code != 200:
-                print(f"  ⚠️ Adzuna returned {response.status_code}")
                 continue
             
-            data = response.json()
-            
-            for job in data.get('results', []):
-                company_obj = job.get('company', {})
-                company = company_obj.get('display_name', 'Unknown')
+            for job in response.json().get('results', []):
+                company = job.get('company', {}).get('display_name', 'Unknown')
                 title = job.get('title', '')
                 description = job.get('description', '')
                 job_url = job.get('redirect_url', '')
-                location_obj = job.get('location', {})
-                location = location_obj.get('display_name', '')
+                location = job.get('location', {}).get('display_name', '')
+                created = job.get('created', '')
                 
-                # FILTER 1: Valid URL
+                # ONLY 3 FILTERS: Valid URL + USA + Recent
                 if not job_url or not job_url.startswith('http'):
                     continue
-                
-                # FILTER 2: USA only
-                if not is_usa_only(location):
+                if not is_usa_location(location):
                     continue
-                
-                # FILTER 3: No government
-                if is_government(company):
-                    continue
-                
-                # FILTER 4: No senior roles
-                if is_clearly_senior(title):
-                    continue
-                
-                # FILTER 5: Full-time only
-                is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
-                if is_not_ft:
-                    continue
-                
-                # FILTER 6: No visa blockers
-                has_blocker, blocker = has_hard_blocker(title + ' ' + description)
-                if has_blocker:
-                    continue
-                
-                # FILTER 7: Max 3 years experience
-                too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
-                if too_much_exp:
+                if not is_recent(created, hours=24):
                     continue
                 
                 print(f"  ✅ {company} - {title}")
@@ -387,6 +223,7 @@ def fetch_adzuna_jobs():
                     'title': title,
                     'description': description[:3000],
                     'url': job_url,
+                    'location': location,
                     'source': 'Adzuna',
                     'date_found': datetime.now().strftime('%Y-%m-%d'),
                     'status': 'Raw'
@@ -395,78 +232,102 @@ def fetch_adzuna_jobs():
             time.sleep(1)
             
         except Exception as e:
-            print(f"  ❌ Adzuna query failed: {e}")
-            continue
+            print(f"  ❌ {query}: {e}")
     
     print(f"  ✅ {len(jobs)} jobs from Adzuna")
     return jobs
 
-# ==================== API SOURCE 3: The Muse ====================
-
-def fetch_themuse_jobs():
-    """The Muse API - Tech-focused, curated companies"""
+def fetch_remoteok_jobs():
+    """RemoteOK API - FREE unlimited"""
     jobs = []
-    print("📥 Fetching from The Muse API...")
+    print("📥 RemoteOK API...")
     
     try:
-        url = "https://www.themuse.com/api/public/jobs"
+        url = "https://remoteok.com/api"
+        headers = {'User-Agent': 'Mozilla/5.0 (compatible; JobBot/1.0)'}
         
-        params = {
-            'level': 'Entry Level',
-            'category': 'Software Engineering',
-            'location': 'Flexible / Remote',
-            'page': 1,
-            'descending': 'true',
-            'api_key': 'public'
-        }
-        
-        response = requests.get(url, params=params, timeout=15)
+        response = requests.get(url, headers=headers, timeout=15)
         
         if response.status_code != 200:
-            print(f"  ⚠️ The Muse returned {response.status_code}")
             return jobs
         
         data = response.json()
+        job_posts = data[1:] if isinstance(data, list) else []
         
-        for job in data.get('results', [])[:30]:
-            company_obj = job.get('company', {})
-            company = company_obj.get('name', 'Unknown')
-            title = job.get('name', '')
-            description = job.get('contents', '') or job.get('description', '')
-            job_url = job.get('refs', {}).get('landing_page', '')
-            
+        for job in job_posts[:100]:
+            try:
+                company = job.get('company', 'Unknown')
+                title = job.get('position', '')
+                description = job.get('description', '')
+                job_url = job.get('url', '')
+                location = job.get('location', '')
+                epoch = job.get('epoch', 0)
+                
+                # Check recency
+                if epoch:
+                    posted = datetime.fromtimestamp(epoch)
+                    if (datetime.now() - posted).days > 1:
+                        continue
+                
+                # USA check
+                if not is_usa_location(location):
+                    continue
+                
+                if not job_url or not job_url.startswith('http'):
+                    continue
+                
+                print(f"  ✅ {company} - {title}")
+                
+                job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
+                
+                jobs.append({
+                    'job_id': job_id,
+                    'company': company,
+                    'title': title,
+                    'description': description[:3000],
+                    'url': job_url,
+                    'location': location,
+                    'source': 'RemoteOK',
+                    'date_found': datetime.now().strftime('%Y-%m-%d'),
+                    'status': 'Raw'
+                })
+                
+            except:
+                continue
+        
+        print(f"  ✅ {len(jobs)} jobs from RemoteOK")
+        
+    except Exception as e:
+        print(f"  ❌ RemoteOK: {e}")
+    
+    return jobs
+
+def fetch_himalayas_jobs():
+    """Himalayas Jobs - FREE unlimited"""
+    jobs = []
+    print("📥 Himalayas API...")
+    
+    try:
+        url = "https://himalayas.app/jobs/api"
+        
+        response = requests.get(url, timeout=15)
+        
+        if response.status_code != 200:
+            return jobs
+        
+        for job in response.json().get('jobs', [])[:50]:
+            company = job.get('company', {}).get('name', 'Unknown')
+            title = job.get('title', '')
+            description = job.get('description', '')
+            job_url = job.get('url', '')
             locations = job.get('locations', [])
-            location = locations[0].get('name', '') if locations else ''
             
-            # FILTER 1: Valid URL
+            # USA check
+            location_str = ' '.join(locations) if locations else ''
+            if not is_usa_location(location_str):
+                continue
+            
             if not job_url or not job_url.startswith('http'):
-                continue
-            
-            # FILTER 2: USA only
-            if location and not is_usa_only(location):
-                continue
-            
-            # FILTER 3: No government
-            if is_government(company):
-                continue
-            
-            # FILTER 4: No senior roles
-            if is_clearly_senior(title):
-                continue
-            
-            # FILTER 5: Full-time only
-            is_not_ft, reason = is_obviously_not_fulltime(title + ' ' + description)
-            if is_not_ft:
-                continue
-            
-            # FILTER 6: No visa blockers
-            has_blocker, blocker = has_hard_blocker(title + ' ' + description)
-            if has_blocker:
-                continue
-            
-            # FILTER 7: Max 3 years experience
-            too_much_exp, reason = requires_too_much_experience(title + ' ' + description)
-            if too_much_exp:
                 continue
             
             print(f"  ✅ {company} - {title}")
@@ -479,24 +340,199 @@ def fetch_themuse_jobs():
                 'title': title,
                 'description': description[:3000],
                 'url': job_url,
-                'source': 'TheMuse',
+                'location': location_str,
+                'source': 'Himalayas',
                 'date_found': datetime.now().strftime('%Y-%m-%d'),
                 'status': 'Raw'
             })
         
-        print(f"  ✅ {len(jobs)} jobs from The Muse")
+        print(f"  ✅ {len(jobs)} jobs from Himalayas")
         
     except Exception as e:
-        print(f"  ❌ The Muse error: {e}")
+        print(f"  ❌ Himalayas: {e}")
     
     return jobs
 
-# ==================== API SOURCE 4: Greenhouse ====================
+# ==================== LAYER 2: RSS FEEDS ====================
+
+def fetch_rss_jobs():
+    """Fetch jobs from RSS feeds - FREE unlimited"""
+    jobs = []
+    print("📥 RSS Feeds...")
+    
+    for name, url in RSS_FEEDS.items():
+        try:
+            feed = feedparser.parse(url)
+            
+            for entry in feed.entries[:30]:
+                # Extract company from title (usually "Company - Job Title")
+                title_parts = entry.title.split(' - ') if ' - ' in entry.title else [entry.title]
+                company = title_parts[0] if len(title_parts) > 1 else 'Unknown'
+                title = title_parts[1] if len(title_parts) > 1 else title_parts[0]
+                
+                job_url = entry.link
+                description = entry.get('summary', '')[:3000]
+                
+                # Basic location check from description
+                if description and not is_usa_location(description):
+                    continue
+                
+                if not job_url or not job_url.startswith('http'):
+                    continue
+                
+                print(f"  ✅ {company} - {title}")
+                
+                job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
+                
+                jobs.append({
+                    'job_id': job_id,
+                    'company': company,
+                    'title': title,
+                    'description': description,
+                    'url': job_url,
+                    'location': 'Remote',
+                    'source': f'RSS-{name}',
+                    'date_found': datetime.now().strftime('%Y-%m-%d'),
+                    'status': 'Raw'
+                })
+                
+        except Exception as e:
+            print(f"  ❌ RSS {name}: {e}")
+    
+    print(f"  ✅ {len(jobs)} jobs from RSS")
+    return jobs
+
+# ==================== LAYER 3: COMPANY APIs ====================
+
+def fetch_google_jobs():
+    """Google Careers API - FREE"""
+    jobs = []
+    print("📥 Google Careers...")
+    
+    try:
+        url = "https://careers.google.com/api/v3/search/"
+        
+        params = {
+            'employment_type': 'FULL_TIME',
+            'location': 'United States',
+            'q': 'Software Engineer',
+            'hl': 'en_US'
+        }
+        
+        response = requests.get(url, params=params, timeout=15)
+        
+        if response.status_code == 200:
+            for job in response.json().get('jobs', [])[:20]:
+                job_id = hashlib.md5(f"Google{job['title']}".encode()).hexdigest()[:8]
+                
+                jobs.append({
+                    'job_id': job_id,
+                    'company': 'Google',
+                    'title': job['title'],
+                    'description': job.get('description', '')[:3000],
+                    'url': f"https://careers.google.com/jobs/results/{job['id']}/",
+                    'location': ', '.join(job.get('locations', [])),
+                    'source': 'Google-Direct',
+                    'date_found': datetime.now().strftime('%Y-%m-%d'),
+                    'status': 'Raw'
+                })
+                
+                print(f"  ✅ Google - {job['title']}")
+        
+        print(f"  ✅ {len(jobs)} jobs from Google")
+        
+    except Exception as e:
+        print(f"  ❌ Google: {e}")
+    
+    return jobs
+
+def fetch_apple_jobs():
+    """Apple Careers API - FREE"""
+    jobs = []
+    print("📥 Apple Careers...")
+    
+    try:
+        url = "https://jobs.apple.com/api/role/search"
+        
+        params = {
+            'location': 'United-States-USA',
+            'team': 'apps-and-frameworks'
+        }
+        
+        response = requests.get(url, params=params, timeout=15)
+        
+        if response.status_code == 200:
+            for job in response.json().get('searchResults', [])[:20]:
+                job_id = hashlib.md5(f"Apple{job['postingTitle']}".encode()).hexdigest()[:8]
+                
+                jobs.append({
+                    'job_id': job_id,
+                    'company': 'Apple',
+                    'title': job['postingTitle'],
+                    'description': job.get('jobSummary', '')[:3000],
+                    'url': f"https://jobs.apple.com/en-us/details/{job['positionId']}",
+                    'location': job.get('locations', ''),
+                    'source': 'Apple-Direct',
+                    'date_found': datetime.now().strftime('%Y-%m-%d'),
+                    'status': 'Raw'
+                })
+                
+                print(f"  ✅ Apple - {job['postingTitle']}")
+        
+        print(f"  ✅ {len(jobs)} jobs from Apple")
+        
+    except Exception as e:
+        print(f"  ❌ Apple: {e}")
+    
+    return jobs
+
+def fetch_amazon_jobs():
+    """Amazon Jobs JSON - FREE"""
+    jobs = []
+    print("📥 Amazon Jobs...")
+    
+    try:
+        url = "https://www.amazon.jobs/en/search.json"
+        
+        params = {
+            'base_query': 'software engineer',
+            'loc_query': 'United States',
+            'result_limit': 20
+        }
+        
+        response = requests.get(url, params=params, timeout=15)
+        
+        if response.status_code == 200:
+            for job in response.json().get('jobs', []):
+                job_id = hashlib.md5(f"Amazon{job['title']}".encode()).hexdigest()[:8]
+                
+                jobs.append({
+                    'job_id': job_id,
+                    'company': 'Amazon',
+                    'title': job['title'],
+                    'description': job.get('description', '')[:3000],
+                    'url': f"https://www.amazon.jobs{job['job_path']}",
+                    'location': job.get('location', ''),
+                    'source': 'Amazon-Direct',
+                    'date_found': datetime.now().strftime('%Y-%m-%d'),
+                    'status': 'Raw'
+                })
+                
+                print(f"  ✅ Amazon - {job['title']}")
+        
+        print(f"  ✅ {len(jobs)} jobs from Amazon")
+        
+    except Exception as e:
+        print(f"  ❌ Amazon: {e}")
+    
+    return jobs
+
+# ==================== LAYER 4: ATS APIs ====================
 
 def fetch_greenhouse_jobs():
     """Greenhouse company boards"""
     jobs = []
-    print("📥 Fetching from Greenhouse...")
+    print("📥 Greenhouse...")
     
     for company_id in GREENHOUSE_COMPANIES:
         try:
@@ -506,28 +542,13 @@ def fetch_greenhouse_jobs():
             if response.status_code != 200:
                 continue
             
-            data = response.json()
-            
-            for job in data.get('jobs', []):
+            for job in response.json().get('jobs', []):
                 title = job.get('title', '')
                 job_url = job.get('absolute_url', '')
                 location = job.get('location', {}).get('name', '')
                 
-                # FILTER 1: Valid URL
-                if not job_url or not job_url.startswith('http'):
+                if not job_url or not is_usa_location(location):
                     continue
-                
-                # FILTER 2: USA only
-                if not is_usa_only(location):
-                    continue
-                
-                # FILTER 3: No senior roles
-                if is_clearly_senior(title):
-                    continue
-                
-                # Note: Greenhouse jobs don't have descriptions in list API
-                # Can't apply full-time, visa, experience filters here
-                # Claude will handle these in matching phase
                 
                 print(f"  ✅ {company_id.title()} - {title}")
                 
@@ -539,6 +560,7 @@ def fetch_greenhouse_jobs():
                     'title': title,
                     'description': f"Location: {location}",
                     'url': job_url,
+                    'location': location,
                     'source': 'Greenhouse',
                     'date_found': datetime.now().strftime('%Y-%m-%d'),
                     'status': 'Raw'
@@ -546,18 +568,16 @@ def fetch_greenhouse_jobs():
             
             time.sleep(0.5)
             
-        except Exception as e:
+        except:
             continue
     
     print(f"  ✅ {len(jobs)} jobs from Greenhouse")
     return jobs
 
-# ==================== API SOURCE 5: Lever ====================
-
 def fetch_lever_jobs():
     """Lever company boards"""
     jobs = []
-    print("📥 Fetching from Lever...")
+    print("📥 Lever...")
     
     for company_id in LEVER_COMPANIES:
         try:
@@ -567,28 +587,13 @@ def fetch_lever_jobs():
             if response.status_code != 200:
                 continue
             
-            company_jobs = response.json()
-            
-            for job in company_jobs:
+            for job in response.json():
                 title = job.get('text', '')
                 job_url = job.get('hostedUrl', '')
                 location = job.get('categories', {}).get('location', '')
                 
-                # FILTER 1: Valid URL
-                if not job_url or not job_url.startswith('http'):
+                if not job_url or not is_usa_location(location):
                     continue
-                
-                # FILTER 2: USA only
-                if not is_usa_only(location):
-                    continue
-                
-                # FILTER 3: No senior roles
-                if is_clearly_senior(title):
-                    continue
-                
-                # Note: Lever jobs don't have descriptions in list API
-                # Can't apply full-time, visa, experience filters here
-                # Claude will handle these in matching phase
                 
                 print(f"  ✅ {company_id.title()} - {title}")
                 
@@ -600,6 +605,7 @@ def fetch_lever_jobs():
                     'title': title,
                     'description': f"Location: {location}",
                     'url': job_url,
+                    'location': location,
                     'source': 'Lever',
                     'date_found': datetime.now().strftime('%Y-%m-%d'),
                     'status': 'Raw'
@@ -607,18 +613,16 @@ def fetch_lever_jobs():
             
             time.sleep(0.5)
             
-        except Exception as e:
+        except:
             continue
     
     print(f"  ✅ {len(jobs)} jobs from Lever")
     return jobs
 
-# ==================== API SOURCE 6: SimplifyJobs ====================
-
 def fetch_simplify_github():
     """SimplifyJobs curated list"""
     jobs = []
-    print("📥 Fetching from SimplifyJobs GitHub...")
+    print("📥 SimplifyJobs...")
     
     try:
         url = "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json"
@@ -627,35 +631,19 @@ def fetch_simplify_github():
         if response.status_code != 200:
             return jobs
         
-        data = response.json()
-        
-        for job in data[:50]:
+        for job in response.json()[:100]:
             company = job.get('company_name', '')
             title = job.get('title', '')
             locations = job.get('locations', [])
             job_url = job.get('url', '')
             active = job.get('active', True)
             
-            # FILTER 1: Active and valid URL
-            if not active or not job_url or not job_url.startswith('http'):
+            if not active or not job_url:
                 continue
             
-            # FILTER 2: USA only
             location_str = ' '.join(locations) if isinstance(locations, list) else str(locations)
-            if not is_usa_only(location_str):
+            if not is_usa_location(location_str):
                 continue
-            
-            # FILTER 3: No government
-            if is_government(company):
-                continue
-            
-            # FILTER 4: No senior roles
-            if is_clearly_senior(title):
-                continue
-            
-            # Note: SimplifyJobs is curated for new grads
-            # Full-time, visa, experience filters not needed
-            # These are already vetted
             
             print(f"  ✅ {company} - {title}")
             
@@ -665,8 +653,9 @@ def fetch_simplify_github():
                 'job_id': job_id,
                 'company': company,
                 'title': title,
-                'description': f"Locations: {location_str}\nCurated by SimplifyJobs",
+                'description': f"Locations: {location_str}",
                 'url': job_url,
+                'location': location_str,
                 'source': 'SimplifyJobs',
                 'date_found': datetime.now().strftime('%Y-%m-%d'),
                 'status': 'Raw'
@@ -675,14 +664,14 @@ def fetch_simplify_github():
         print(f"  ✅ {len(jobs)} jobs from SimplifyJobs")
         
     except Exception as e:
-        print(f"  ❌ SimplifyJobs error: {e}")
+        print(f"  ❌ SimplifyJobs: {e}")
     
     return jobs
 
 # ==================== MAIN ====================
 
 def save_to_sheets(jobs):
-    """Save to Google Sheets with deduplication"""
+    """Save to Google Sheets"""
     from sheets_helper import get_sheet
     
     if not jobs:
@@ -724,67 +713,63 @@ def save_to_sheets(jobs):
 
 def main():
     print("=" * 80)
-    print("🎯 NEW GRAD JOB HUNTER - Multi-API Edition")
+    print("🎯 EXPERT JOB SCRAPER - Maximum Coverage, Zero Cost")
     print("=" * 80)
-    print("Sources:")
-    print("  • JSearch (Google Jobs, LinkedIn, ZipRecruiter)")
-    print("  • Adzuna (Indeed, Monster, CareerBuilder)")
-    print("  • The Muse (Curated tech companies)")
-    print("  • Greenhouse (Top tech companies)")
-    print("  • Lever (Startups)")
-    print("  • SimplifyJobs (Curated new grad list)")
-    print("\nFilters Applied to ALL Sources:")
-    print("  ✅ STRICT USA-only (no Canada, ambiguous Remote)")
-    print("  ✅ Max 3 years experience")
-    print("  ✅ Full-time only (no internships, contract, part-time)")
-    print("  ✅ No citizenship/clearance requirements")
-    print("  ✅ No government/defense jobs")
-    print("  ✅ No senior roles (Staff, Principal, etc.)")
+    print("Strategy: COLLECT EVERYTHING, LET CLAUDE FILTER")
+    print("\nScraper Filters (Minimal):")
+    print("  ✅ USA location only")
+    print("  ✅ Posted in last 24 hours")
+    print("  ✅ Valid URL")
+    print("\nClaude Will Filter (Smart):")
+    print("  🤖 Experience level (0-3 years)")
+    print("  🤖 Full-time vs contract")
+    print("  🤖 Visa requirements")
+    print("  🤖 Skill matching")
     print("=" * 80)
     
     all_jobs = []
     
-    # Fetch from ALL sources
+    # LAYER 1: Free APIs
     all_jobs.extend(fetch_jsearch_jobs())
     all_jobs.extend(fetch_adzuna_jobs())
-    all_jobs.extend(fetch_themuse_jobs())
+    all_jobs.extend(fetch_remoteok_jobs())
+    all_jobs.extend(fetch_himalayas_jobs())
+    
+    # LAYER 2: RSS Feeds
+    all_jobs.extend(fetch_rss_jobs())
+    
+    # LAYER 3: Direct Company APIs
+    all_jobs.extend(fetch_google_jobs())
+    all_jobs.extend(fetch_apple_jobs())
+    all_jobs.extend(fetch_amazon_jobs())
+    
+    # LAYER 4: ATS APIs
     all_jobs.extend(fetch_greenhouse_jobs())
     all_jobs.extend(fetch_lever_jobs())
     all_jobs.extend(fetch_simplify_github())
     
-    print(f"\n📊 Total jobs collected: {len(all_jobs)}")
+    print(f"\n📊 Total collected: {len(all_jobs)} jobs")
     
-    # Remove duplicates across sources
+    # Deduplicate
     unique_jobs = {}
     for job in all_jobs:
         key = f"{job['company']}{job['title']}"
         if key not in unique_jobs:
             unique_jobs[key] = job
     
-    deduped_jobs = list(unique_jobs.values())
-    duplicates = len(all_jobs) - len(deduped_jobs)
+    deduped = list(unique_jobs.values())
     
-    if duplicates > 0:
-        print(f"📊 Removed {duplicates} duplicates across sources")
-        print(f"📊 Unique jobs: {len(deduped_jobs)}")
+    if len(all_jobs) > len(deduped):
+        print(f"📊 Removed {len(all_jobs) - len(deduped)} duplicates")
+        print(f"📊 Unique: {len(deduped)}")
     
-    # Save
-    new_count = save_to_sheets(deduped_jobs)
+    new_count = save_to_sheets(deduped)
     
     print("\n" + "=" * 80)
-    print("✅ SCRAPING COMPLETE")
+    print("✅ COLLECTION COMPLETE")
     print("=" * 80)
-    print(f"Jobs added: {new_count}")
-    print("\nAll jobs passed these filters:")
-    print("  1. Valid application URL")
-    print("  2. USA location only")
-    print("  3. Not government/defense")
-    print("  4. Not senior/staff/principal")
-    print("  5. Full-time employment")
-    print("  6. No citizenship requirements")
-    print("  7. Max 3 years experience")
-    print("\n👉 Check Google Sheet 'Raw Jobs' tab")
-    print("👉 Run 'Analyze Jobs' for Claude matching")
+    print(f"Jobs saved: {new_count}")
+    print("\n👉 Next: Run 'Analyze Jobs' - Claude will apply ALL filters")
     print("=" * 80)
 
 if __name__ == "__main__":

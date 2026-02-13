@@ -1,10 +1,13 @@
+# matcher.py - MULTI-RESUME MATCHER
+
 import anthropic
 import json
 import argparse
 import time
-import re 
+import re
 from sheets_helper import get_sheet
-from config import ANTHROPIC_API_KEY, RESUME_PROFILE
+from config import ANTHROPIC_API_KEY, RESUME_PROFILES, get_resume_profile, list_available_profiles
+
 
 def get_unanalyzed_jobs(limit=20):
     """Get jobs with Status='Raw' from TODAY ONLY"""
@@ -16,10 +19,8 @@ def get_unanalyzed_jobs(limit=20):
         
         all_data = worksheet.get_all_records()
         
-        # Get today's date
         today = datetime.now().strftime('%Y-%m-%d')
         
-        # Filter: Status='Raw' AND Date Found = today
         raw_jobs = [
             job for job in all_data 
             if job.get('Status') == 'Raw' 
@@ -28,7 +29,6 @@ def get_unanalyzed_jobs(limit=20):
         
         print(f"Found {len(raw_jobs)} unanalyzed jobs from today ({today})")
         
-        # If no jobs today, check yesterday (in case of timezone issues)
         if not raw_jobs:
             from datetime import timedelta
             yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
@@ -46,189 +46,202 @@ def get_unanalyzed_jobs(limit=20):
         print(f"Error getting jobs: {e}")
         return []
 
-def analyze_job(job):
-    """Analyze single job with Claude - Experience & Full-Time filters"""
+def analyze_job(job, resume_profile):
+    """Claude analyzes job against specific resume profile"""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     
-    prompt = f"""Analyze this job for a CANDIDATE with 0-2 years experience.
+    # Build dynamic prompt based on resume profile
+    prompt = f"""You are an expert staffing recruiter. Analyze if this candidate qualifies for this job.
 
-MY PROFILE:
-Experience Level: New grad to 2 years (NOT eligible for 3+ years roles)
-Core Skills (must-have): {', '.join(RESUME_PROFILE['core_skills'])}
-Important: {', '.join(RESUME_PROFILE['important_skills'])}
-Nice-to-have: {', '.join(RESUME_PROFILE['nice_skills'])}
+CANDIDATE PROFILE: "{resume_profile['name']}"
+Experience Level: {resume_profile['experience_years']} years
+Target Roles: {', '.join(resume_profile['target_roles'])}
 
-JOB:
+CORE SKILLS (MUST HAVE - candidate has these):
+{', '.join(resume_profile['core_skills'])}
+
+IMPORTANT SKILLS (candidate has these):
+{', '.join(resume_profile['important_skills'])}
+
+NICE-TO-HAVE SKILLS (candidate has these):
+{', '.join(resume_profile['nice_skills'])}
+
+FORBIDDEN ROLES (auto-reject):
+{', '.join(resume_profile['forbidden_keywords'])}
+
+EMPLOYMENT REQUIREMENTS:
+- Location: USA only
+- Employment: Full-time only (or contract-to-hire converting to FTE)
+- Visa: Will need H1B sponsorship (no citizenship/clearance roles)
+
+JOB POSTING:
 Company: {job['Company']}
 Title: {job['Title']}
-Description: {job['Description'][:2000]}
+Source: {job.get('Source', 'Unknown')}
+Full Description:
+{job['Description'][:3000]}
 
-CRITICAL EXPERIENCE RULES:
-- ACCEPT: "0-2 years", "1-3 years", "2-3 years", "new grad", "entry level", "junior"
-- ACCEPT: "Experience preferred" (not required)
-- ACCEPT: "Experience building X" (if no specific year count)
-- REJECT: "3+ years required", "4+ years", "5+ years", "minimum 3 years"
-- REJECT: "Senior level", "Mid-level", "Experienced engineer"
-- If description says "3 years" but also says "new grad considered", ACCEPT
+ANALYSIS INSTRUCTIONS:
 
-CRITICAL EMPLOYMENT RULES:
-- ACCEPT: Full-time, Permanent, FTE, W2 employee, Salaried position
-- ACCEPT: Contract-to-hire (if explicitly states conversion to full-time)
-- ACCEPT: Contract (if W2 contract through employer, not 1099)
-- REJECT: Part-time, Internship, Freelance, 1099, Consulting, Temporary
-- REJECT: Contract (if 1099 or no mention of conversion)
+1. EXPERIENCE ANALYSIS:
+   - Does job allow {resume_profile['experience_years']} years?
+   - Look for: "new grad", "entry level", "0-2 years", "junior"
+   - Check for MULTIPLE tracks (e.g., "5+ years OR new grads")
+   - Distinguish "required" vs "preferred"
+   - QUALIFY if any track allows ≤3 years OR experience is "preferred"
+   - REJECT only if clearly "minimum 5+ years REQUIRED" with no junior option
 
-Return JSON only (no markdown):
+2. ROLE RELEVANCE:
+   - Is this one of the target roles: {', '.join(resume_profile['target_roles'])}?
+   - Or related engineering role?
+   - NOT forbidden: {', '.join(resume_profile['forbidden_keywords'])}
+
+3. SKILL MATCHING:
+   - Count how many CORE skills the job requires
+   - Does candidate have MOST of them?
+   - ats_safe=true if candidate has ≥60% of required core skills
+   - Tier 1: Has ≥80% required skills + interesting company
+   - Tier 2: Has ≥60% required skills, good backup
+
+4. EMPLOYMENT TYPE:
+   - ACCEPT: Full-time, FTE, Permanent, W2
+   - ACCEPT: Contract-to-hire IF converts to FTE
+   - REJECT: Internship, part-time, 1099, freelance, temporary
+
+5. VISA/CITIZENSHIP:
+   - REJECT: "US citizen only", "security clearance", "no visa sponsorship"
+   - ACCEPT: Everything else (most don't mention it)
+
+Return ONLY valid JSON (no markdown):
 {{
-  "experience_required": "0-2 years / 2-3 years / 3+ years / unclear",
-  "experience_acceptable": true if 0-3 years OR unclear/flexible,
-  "employment_type": "full-time / contract-to-hire / contract / part-time / internship / unclear",
-  "employment_acceptable": true if full-time or contract-to-hire with FTE conversion,
-  "relevant": true if ML/AI/Software role matching my skills,
-  "ats_safe": true if I have core skills,
-  "visa_friendly": true,
-  "visa_notes": "pre-screened for H1B friendliness",
+  "experience_required_min": 0-10,
+  "experience_type": "required / preferred / not_mentioned",
+  "has_new_grad_track": true/false,
+  "candidate_qualifies_experience": true/false,
+  "experience_reasoning": "why",
+  
+  "employment_type": "full-time / contract-to-hire / contract / internship / part-time",
+  "candidate_qualifies_employment": true/false,
+  
+  "visa_friendly": true/false,
+  "visa_notes": "explanation",
+  "candidate_qualifies_visa": true/false,
+  
+  "role_match": "exact / related / not_relevant",
+  "is_forbidden_role": true/false,
+  
+  "core_skills_required": ["skill1", "skill2"],
+  "core_skills_candidate_has": ["skill1", "skill2"],
+  "core_skills_match_percent": 0-100,
+  "ats_safe": true/false,
+  
+  "relevant": true/false,
   "match_score": 0-100,
-  "tier": 1 if strong technical match else 2,
-  "why_strong": "reason if tier 1",
-  "risks": "skills to learn OR experience gap"
+  "tier": 1 or 2 or null,
+  "why_strong": "if tier 1",
+  "risks": "gaps to address",
+  
+  "overall_qualified": true/false,
+  "final_reasoning": "summary"
 }}
 
-Rules:
-- experience_acceptable=false → relevant MUST be false (reject the job)
-- employment_acceptable=false → relevant MUST be false (reject the job)
-- If "3 years preferred" but "new grads encouraged", mark experience_acceptable=true
-- visa_friendly is ALWAYS true (already filtered)
-- ats_safe=false ONLY if missing core technical skills
-- Tier 1: Strong match on ML/AI skills, interesting company, 0-2 years
-- Tier 2: Acceptable match, 0-3 years (stretch), good backup option
-- Forbidden roles: {', '.join(RESUME_PROFILE['forbidden_keywords'])}
+LOGIC:
+- is_forbidden_role=true → overall_qualified=false
+- overall_qualified = experience AND employment AND visa AND relevant AND ats_safe AND (not is_forbidden_role)
 """
-        
+    
     try:
         response = client.messages.create(
             model="claude-3-5-haiku-20241022",
-            max_tokens=500,
+            max_tokens=1000,
+            temperature=0,
             messages=[{"role": "user", "content": prompt}]
         )
         
         text = response.content[0].text.strip()
         
-        # AGGRESSIVE CLEANING - Remove all common junk
-        
-        # Remove markdown code blocks
+        # Clean JSON
         text = re.sub(r'```json\s*', '', text)
         text = re.sub(r'```\s*', '', text)
-        
-        # Remove leading/trailing asterisks, stars, etc.
         text = re.sub(r'^\*+\s*', '', text)
-        text = re.sub(r'\s*\*+$', '', text)
         
-        # Find the actual JSON (between first { and last })
         first_brace = text.find('{')
         last_brace = text.rfind('}')
         
         if first_brace != -1 and last_brace != -1:
             text = text[first_brace:last_brace+1]
         
-        # Final cleanup
-        text = text.strip()
-        
-        # Try to parse
         result = json.loads(text)
         
-        # Validate required fields
-        required_fields = ['relevant', 'ats_safe', 'visa_friendly', 'match_score', 'tier']
-        for field in required_fields:
+        # Validate
+        required = ['overall_qualified', 'relevant', 'ats_safe', 'match_score', 'tier']
+        for field in required:
             if field not in result:
-                print(f"  ⚠️ Missing field '{field}', setting default")
-                if field == 'relevant' or field == 'ats_safe' or field == 'visa_friendly':
-                    result[field] = False
-                elif field == 'match_score':
-                    result[field] = 0
-                elif field == 'tier':
-                    result[field] = None
+                result[field] = False if field != 'match_score' else 0
         
         return result
         
     except json.JSONDecodeError as e:
-        print(f"  ❌ JSON parse error for {job['Company']}: {e}")
-        print(f"     Raw response: {text[:300] if 'text' in locals() else 'N/A'}")
-        
-        # Try one more time with even more aggressive cleaning
+        print(f"  ❌ JSON error: {e}")
         try:
-            # Extract everything between first { and last }
             match = re.search(r'\{.*\}', text, re.DOTALL)
             if match:
-                clean_json = match.group(0)
-                result = json.loads(clean_json)
-                print(f"  ✅ Recovered from bad formatting")
-                return result
+                return json.loads(match.group(0))
         except:
             pass
-        
         return None
         
     except Exception as e:
-        print(f"  ❌ Error analyzing {job['Company']}: {e}")
+        print(f"  ❌ Error: {e}")
         return None
 
-def save_analysis(job, analysis):
-    """Save to Analyzed Jobs sheet"""
+def save_analysis(job, analysis, resume_profile_name):
+    """Save to Analyzed Jobs sheet with profile info"""
     try:
         sheet = get_sheet()
         
         if not analysis:
             return False
         
-        # Check experience requirement
-        if not analysis.get('experience_acceptable'):
+        # REJECT if not qualified
+        if not analysis.get('overall_qualified'):
             raw_sheet = sheet.worksheet("Raw Jobs")
             cell = raw_sheet.find(job['Job ID'])
             if cell:
                 raw_sheet.update_cell(cell.row, 8, 'Rejected')
             
-            exp_required = analysis.get('experience_required', 'unknown')
-            print(f"  ❌ Rejected: too much experience required ({exp_required})")
-            return False
-        
-        # Check employment type
-        if not analysis.get('employment_acceptable'):
-            raw_sheet = sheet.worksheet("Raw Jobs")
-            cell = raw_sheet.find(job['Job ID'])
-            if cell:
-                raw_sheet.update_cell(cell.row, 8, 'Rejected')
-            
-            emp_type = analysis.get('employment_type', 'unknown')
-            print(f"  ❌ Rejected: not full-time ({emp_type})")
-            return False
-        
-        # Check relevance, ATS, visa
-        if not analysis.get('relevant') or not analysis.get('ats_safe') or not analysis.get('visa_friendly'):
-            raw_sheet = sheet.worksheet("Raw Jobs")
-            cell = raw_sheet.find(job['Job ID'])
-            if cell:
-                raw_sheet.update_cell(cell.row, 8, 'Rejected')
-            
-            reject_reason = []
+            reasons = []
+            if analysis.get('is_forbidden_role'):
+                reasons.append("Forbidden role type")
+            if not analysis.get('candidate_qualifies_experience'):
+                reasons.append(f"Exp: {analysis.get('experience_reasoning', 'too senior')}")
+            if not analysis.get('candidate_qualifies_employment'):
+                reasons.append(f"Employment: {analysis.get('employment_type')}")
+            if not analysis.get('candidate_qualifies_visa'):
+                reasons.append(f"Visa: {analysis.get('visa_notes')}")
             if not analysis.get('relevant'):
-                reject_reason.append("not relevant")
+                reasons.append("Not relevant")
             if not analysis.get('ats_safe'):
-                reject_reason.append("missing core skills")
-            if not analysis.get('visa_friendly'):
-                reject_reason.append(f"visa issue")
+                reasons.append(f"Skills: {analysis.get('core_skills_match_percent', 0)}% match")
             
-            print(f"  ❌ Rejected: {', '.join(reject_reason)}")
+            print(f"  ❌ Rejected: {'; '.join(reasons)}")
             return False
         
-        # Save to Analyzed Jobs (rest of function stays the same)
+        # ACCEPT - Save
         analyzed_sheet = sheet.worksheet("Analyzed Jobs")
         
-        risks_text = analysis.get('risks', '')
-        visa_text = analysis.get('visa_notes', '')
-        exp_text = analysis.get('experience_required', '')
+        # Combine notes
+        notes = []
+        notes.append(f"Profile: {resume_profile_name}")
+        notes.append(f"Experience: {analysis.get('experience_reasoning', '')}")
+        notes.append(f"Skills Match: {analysis.get('core_skills_match_percent', 0)}%")
+        notes.append(f"Required: {', '.join(analysis.get('core_skills_required', []))}")
+        notes.append(f"Has: {', '.join(analysis.get('core_skills_candidate_has', []))}")
+        notes.append(f"Employment: {analysis.get('employment_type', '')}")
+        notes.append(f"Visa: {analysis.get('visa_notes', '')}")
+        notes.append(f"Risks: {analysis.get('risks', '')}")
         
-        combined_risks = f"{risks_text}\nVisa: {visa_text}\nExp: {exp_text}"
+        combined_notes = '\n'.join([n for n in notes if n and not n.endswith(': ')])
         
         row = [
             job['Job ID'],
@@ -238,40 +251,62 @@ def save_analysis(job, analysis):
             analysis.get('tier', ''),
             analysis.get('match_score', 0),
             analysis.get('why_strong', ''),
-            combined_risks,
+            combined_notes,
             job.get('Date Found', ''),
-            '',  # Apply checkbox
-            ''   # Applied date
+            '',
+            ''
         ]
         
         analyzed_sheet.append_row(row)
         
-        # Update Raw Jobs status
+        # Update status
         raw_sheet = sheet.worksheet("Raw Jobs")
         cell = raw_sheet.find(job['Job ID'])
         if cell:
             raw_sheet.update_cell(cell.row, 8, 'Analyzed')
         
-        print(f"  ✅ Tier {analysis.get('tier')} - Score: {analysis.get('match_score')}")
+        tier = analysis.get('tier', 'N/A')
+        score = analysis.get('match_score', 0)
+        skills_pct = analysis.get('core_skills_match_percent', 0)
+        print(f"  ✅ Tier {tier} - Score: {score}/100 - Skills: {skills_pct}%")
         return True
         
     except Exception as e:
-        print(f"  ❌ Error saving analysis: {e}")
+        print(f"  ❌ Error saving: {e}")
         return False
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--limit', type=int, default=20)
+    parser = argparse.ArgumentParser(description='Analyze jobs against resume profile')
+    parser.add_argument('--limit', type=int, default=20, help='Max jobs to analyze')
+    parser.add_argument('--profile', type=str, 
+                       help='Resume profile to use (run with --list to see available profiles)')
+    parser.add_argument('--list', action='store_true', 
+                       help='List all available resume profiles')
     args = parser.parse_args()
     
-    print(f"🤖 Analyzing up to {args.limit} jobs (H1B friendly filter ON)...")
+    # List profiles if requested
+    if args.list:
+        list_available_profiles()
+        return
+    
+    # Get resume profile
+    resume_profile = get_resume_profile(args.profile)
+    
+    print("=" * 80)
+    print(f"🤖 ANALYZING JOBS - Profile: {resume_profile['name']}")
+    print("=" * 80)
+    print(f"Description: {resume_profile['description']}")
+    print(f"Experience: {resume_profile.get('experience_years', 'N/A')}")
+    print(f"Core Skills ({len(resume_profile.get('core_skills', []))}): {', '.join(resume_profile.get('core_skills', [])[:10])}...")
+    print(f"Target Roles: {', '.join(resume_profile.get('target_roles', []))}")
+    print("=" * 80)
+    
     
     jobs = get_unanalyzed_jobs(limit=args.limit)
     
     if not jobs:
-        print("❌ No unanalyzed jobs found.")
-        print("   Either all jobs analyzed or no new jobs collected.")
-        print("   Run 'Collect Jobs' first, then try again.")
+        print("\n❌ No unanalyzed jobs from today")
+        print("   Run 'Collect Jobs' first")
         return
     
     tier1_count = 0
@@ -282,10 +317,10 @@ def main():
     for i, job in enumerate(jobs):
         print(f"\n[{i+1}/{len(jobs)}] {job['Company']} - {job['Title']}")
         
-        analysis = analyze_job(job)
+        analysis = analyze_job(job, resume_profile)
         
         if analysis:
-            saved = save_analysis(job, analysis)
+            saved = save_analysis(job, analysis, resume_profile['name'])
             
             if saved:
                 tier = analysis.get('tier')
@@ -295,8 +330,8 @@ def main():
                         'company': job['Company'],
                         'title': job['Title'],
                         'score': analysis.get('match_score', 0),
-                        'why': analysis.get('why_strong', ''),
-                        'visa': analysis.get('visa_notes', '')
+                        'skills_match': analysis.get('core_skills_match_percent', 0),
+                        'why': analysis.get('why_strong', '')
                     })
                 elif tier == 2:
                     tier2_count += 1
@@ -305,38 +340,34 @@ def main():
         else:
             rejected_count += 1
         
-        # Rate limit: 2 seconds between requests
         time.sleep(2)
     
-    # Print summary (no email)
-    print("\n" + "="*60)
-    print("✅ ANALYSIS COMPLETE (H1B Friendly)")
-    print("="*60)
-    print(f"\n📊 SUMMARY:")
-    print(f"   ✨ Tier 1 (Strong Match): {tier1_count} jobs")
-    print(f"   ✅ Tier 2 (Safe Backup): {tier2_count} jobs")
+    # Summary
+    print("\n" + "=" * 80)
+    print(f"✅ ANALYSIS COMPLETE - Profile: {resume_profile['name']}")
+    print("=" * 80)
+    print(f"\n📊 RESULTS:")
+    print(f"   ✨ Tier 1 (Strong Matches): {tier1_count} jobs")
+    print(f"   ✅ Tier 2 (Backup Options): {tier2_count} jobs")
     print(f"   ❌ Rejected: {rejected_count} jobs")
-    print(f"      (reasons: citizenship required, clearance, or skill mismatch)")
     
     if tier1_jobs:
         print(f"\n🎯 TOP TIER 1 MATCHES:")
-        print("-" * 60)
+        print("-" * 80)
         
-        for job in sorted(tier1_jobs, key=lambda x: x['score'], reverse=True)[:3]:
+        for job in sorted(tier1_jobs, key=lambda x: x['score'], reverse=True)[:5]:
             print(f"\n   {job['company']} - {job['title']}")
-            print(f"   Score: {job['score']}/100")
+            print(f"   Overall Score: {job['score']}/100")
+            print(f"   Skills Match: {job['skills_match']}%")
             print(f"   Why: {job['why']}")
-            print(f"   Visa: {job['visa']}")
     
-    print("\n" + "="*60)
+    print("\n" + "=" * 80)
     print("📋 NEXT STEPS:")
-    print("   1. Open your Google Sheet")
-    print("   2. Go to 'Analyzed Jobs' tab")
-    print("   3. Review Tier 1 jobs first")
-    print("   4. Check visa notes in Risks/Gaps column")
-    print("   5. Check the 'Apply?' box for jobs you want")
-    print("   6. Click the URL to apply")
-    print("="*60)
+    print("   1. Open Google Sheet → 'Analyzed Jobs'")
+    print("   2. Filter by Profile in Notes column")
+    print("   3. Sort by Tier (1 first)")
+    print("   4. Apply to best matches!")
+    print("=" * 80)
 
 if __name__ == "__main__":
     main()
