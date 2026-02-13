@@ -1,3 +1,5 @@
+# .github/workflows/analyze_jobs.yml
+
 name: Analyze Jobs
 
 on:
@@ -9,13 +11,19 @@ on:
         type: choice
         options:
           - ml_engineer
-          - backend_engineer
-          - software_engineer
         default: 'ml_engineer'
+      analyze_all:
+        description: 'Analyze all jobs from today?'
+        required: true
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+        default: 'yes'
       limit:
-        description: 'Max jobs to analyze'
+        description: 'If "no" above, max jobs to analyze'
         required: false
-        default: '20'
+        default: '50'
 
 jobs:
   analyze:
@@ -42,4 +50,10 @@ jobs:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          python matcher.py --profile ${{ inputs.profile }} --limit ${{ inputs.limit }}
+          if [ "${{ inputs.analyze_all }}" = "yes" ]; then
+            echo "📋 Analyzing ALL jobs from today"
+            python matcher.py --profile ${{ inputs.profile }} --limit 0
+          else
+            echo "📋 Analyzing up to ${{ inputs.limit }} jobs"
+            python matcher.py --profile ${{ inputs.profile }} --limit ${{ inputs.limit }}
+          fi

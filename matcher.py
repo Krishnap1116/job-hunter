@@ -1,4 +1,4 @@
-# matcher.py - MULTI-RESUME MATCHER
+# matcher.py - Analyze ALL jobs from today (with pre-filtering)
 
 import anthropic
 import json
@@ -6,12 +6,12 @@ import argparse
 import time
 import re
 from sheets_helper import get_sheet
-from config import ANTHROPIC_API_KEY, RESUME_PROFILES, get_resume_profile, list_available_profiles
+from config import ANTHROPIC_API_KEY, RESUME_PROFILES, get_resume_profile
+from pre_filter import pre_filter_jobs  # NEW IMPORT
 
-
-def get_unanalyzed_jobs(limit=20):
-    """Get jobs with Status='Raw' from TODAY ONLY"""
-    from datetime import datetime
+def get_unanalyzed_jobs(limit=None):  # Changed: limit=None means no limit
+    """Get ALL jobs with Status='Raw' from TODAY"""
+    from datetime import datetime, timedelta
     
     try:
         sheet = get_sheet()
@@ -27,10 +27,10 @@ def get_unanalyzed_jobs(limit=20):
             and job.get('Date Found') == today
         ]
         
-        print(f"Found {len(raw_jobs)} unanalyzed jobs from today ({today})")
+        print(f"📋 Found {len(raw_jobs)} unanalyzed jobs from today ({today})")
         
+        # If no jobs today, check yesterday
         if not raw_jobs:
-            from datetime import timedelta
             yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
             raw_jobs = [
                 job for job in all_data 
@@ -40,17 +40,22 @@ def get_unanalyzed_jobs(limit=20):
             if raw_jobs:
                 print(f"  (Found {len(raw_jobs)} from yesterday {yesterday})")
         
-        return raw_jobs[:limit]
+        # Apply limit only if specified
+        if limit and limit < len(raw_jobs):
+            print(f"  ⚠️  Limiting to {limit} jobs (use --limit 0 to analyze all)")
+            return raw_jobs[:limit]
+        
+        return raw_jobs
         
     except Exception as e:
-        print(f"Error getting jobs: {e}")
+        print(f"❌ Error getting jobs: {e}")
         return []
 
+# Keep analyze_job() function exactly as before
 def analyze_job(job, resume_profile):
     """Claude analyzes job against specific resume profile"""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     
-    # Build dynamic prompt based on resume profile
     prompt = f"""You are an expert staffing recruiter. Analyze if this candidate qualifies for this job.
 
 CANDIDATE PROFILE: "{resume_profile['name']}"
@@ -195,6 +200,7 @@ LOGIC:
         print(f"  ❌ Error: {e}")
         return None
 
+# Keep save_analysis() exactly as before
 def save_analysis(job, analysis, resume_profile_name):
     """Save to Analyzed Jobs sheet with profile info"""
     try:
@@ -277,15 +283,17 @@ def save_analysis(job, analysis, resume_profile_name):
 
 def main():
     parser = argparse.ArgumentParser(description='Analyze jobs against resume profile')
-    parser.add_argument('--limit', type=int, default=20, help='Max jobs to analyze')
+    parser.add_argument('--limit', type=int, default=0,  # Changed: 0 = no limit
+                       help='Max jobs to analyze (0 = all jobs from today)')
     parser.add_argument('--profile', type=str, 
-                       help='Resume profile to use (run with --list to see available profiles)')
+                       help='Resume profile to use')
     parser.add_argument('--list', action='store_true', 
                        help='List all available resume profiles')
     args = parser.parse_args()
     
     # List profiles if requested
     if args.list:
+        from config import list_available_profiles
         list_available_profiles()
         return
     
@@ -301,21 +309,39 @@ def main():
     print(f"Target Roles: {', '.join(resume_profile.get('target_roles', []))}")
     print("=" * 80)
     
-    
-    jobs = get_unanalyzed_jobs(limit=args.limit)
+    # Get jobs (all if limit=0)
+    limit = args.limit if args.limit > 0 else None
+    jobs = get_unanalyzed_jobs(limit=limit)
     
     if not jobs:
         print("\n❌ No unanalyzed jobs from today")
         print("   Run 'Collect Jobs' first")
         return
     
+    # PRE-FILTER (NEW!)
+    print("\n" + "=" * 80)
+    print("🔍 STEP 1: PRE-FILTERING (Free)")
+    print("=" * 80)
+    
+    jobs_to_analyze, rejection_stats = pre_filter_jobs(jobs)
+    
+    if not jobs_to_analyze:
+        print("\n❌ All jobs rejected by pre-filter!")
+        print("   Try running 'Collect Jobs' again or check filters")
+        return
+    
+    # CLAUDE ANALYSIS
+    print("\n" + "=" * 80)
+    print(f"🤖 STEP 2: CLAUDE ANALYSIS (${len(jobs_to_analyze) * 0.001:.2f})")
+    print("=" * 80)
+    
     tier1_count = 0
     tier2_count = 0
     rejected_count = 0
     tier1_jobs = []
     
-    for i, job in enumerate(jobs):
-        print(f"\n[{i+1}/{len(jobs)}] {job['Company']} - {job['Title']}")
+    for i, job in enumerate(jobs_to_analyze):
+        print(f"\n[{i+1}/{len(jobs_to_analyze)}] {job['Company']} - {job['Title']}")
         
         analysis = analyze_job(job, resume_profile)
         
@@ -340,16 +366,20 @@ def main():
         else:
             rejected_count += 1
         
-        time.sleep(2)
+        time.sleep(2)  # Rate limiting
     
     # Summary
     print("\n" + "=" * 80)
     print(f"✅ ANALYSIS COMPLETE - Profile: {resume_profile['name']}")
     print("=" * 80)
-    print(f"\n📊 RESULTS:")
-    print(f"   ✨ Tier 1 (Strong Matches): {tier1_count} jobs")
+    
+    print(f"\n📊 OVERALL RESULTS:")
+    print(f"   📥 Total jobs from today: {len(jobs)}")
+    print(f"   🔍 Pre-filtered out: {len(jobs) - len(jobs_to_analyze)} (free)")
+    print(f"   🤖 Analyzed by Claude: {len(jobs_to_analyze)} (${len(jobs_to_analyze) * 0.001:.2f})")
+    print(f"\n   ✨ Tier 1 (Strong Matches): {tier1_count} jobs")
     print(f"   ✅ Tier 2 (Backup Options): {tier2_count} jobs")
-    print(f"   ❌ Rejected: {rejected_count} jobs")
+    print(f"   ❌ Rejected by Claude: {rejected_count} jobs")
     
     if tier1_jobs:
         print(f"\n🎯 TOP TIER 1 MATCHES:")
@@ -364,7 +394,7 @@ def main():
     print("\n" + "=" * 80)
     print("📋 NEXT STEPS:")
     print("   1. Open Google Sheet → 'Analyzed Jobs'")
-    print("   2. Filter by Profile in Notes column")
+    print("   2. Filter by today's date")
     print("   3. Sort by Tier (1 first)")
     print("   4. Apply to best matches!")
     print("=" * 80)
