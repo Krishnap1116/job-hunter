@@ -1,63 +1,101 @@
-# pre_filter.py - STRICT CONFIG ENFORCEMENT
+# pre_filter.py - FIXED VERSION WITH ERROR HANDLING
 
 import re
 from filters_config import PRE_FILTER_CONFIG, get_experience_patterns
 
 def should_analyze(job):
     """
-    Universal pre-filter using STRICT config values
+    Universal pre-filter with error handling
     Returns: (should_analyze: bool, reason: str)
     """
     title = job.get('Title', '').lower()
     description = job.get('Description', '').lower()
     
-    # 1. CHECK: Seniority level (STRICT - no .get() with defaults)
+    # VALIDATE: Ensure we have valid data
+    if not title or not isinstance(title, str):
+        return False, "Invalid title"
+    if not isinstance(description, str):
+        description = ""  # Allow empty description
+    
+    # 1. CHECK: Seniority level
     seniority_keywords = PRE_FILTER_CONFIG['reject_seniority_levels']
     for keyword in seniority_keywords:
-        # Word boundary check to avoid partial matches
-        pattern = r'\b' + re.escape(keyword) + r'\b'
-        if re.search(pattern, title):
-            return False, f"Seniority: {keyword}"
+        # VALIDATE: Ensure keyword is a string
+        if not keyword or not isinstance(keyword, str):
+            continue
+        try:
+            # Word boundary: "senior" matches "Senior Engineer" but not "Seniority"
+            pattern = r'\b' + re.escape(keyword) + r'\b'
+            if re.search(pattern, title):
+                return False, f"Seniority: {keyword}"
+        except Exception:
+            # If regex fails, skip this keyword
+            continue
     
-    # 2. CHECK: Job type (STRICT - no defaults)
+    # 2. CHECK: Job type (internship, part-time, etc.)
     job_types = PRE_FILTER_CONFIG['reject_job_types']
     for job_type in job_types:
+        if not job_type or not isinstance(job_type, str):
+            continue
         if job_type in title:
             return False, f"Job type: {job_type}"
     
-    # 3. CHECK: Specific titles (STRICT - word boundary matching)
+    # 3. CHECK: Specific forbidden titles
     specific_titles = PRE_FILTER_CONFIG['reject_specific_titles']
     for reject_title in specific_titles:
-        # Word boundary: "data analyst" won't match "accounting analyst"
-        pattern = r'\b' + re.escape(reject_title) + r'\b'
-        if re.search(pattern, title):
-            return False, f"Specific title: {reject_title}"
+        if not reject_title or not isinstance(reject_title, str):
+            continue
+        try:
+            # Word boundary: "data analyst" won't match "data analytics engineer"
+            pattern = r'\b' + re.escape(reject_title) + r'\b'
+            if re.search(pattern, title):
+                return False, f"Specific title: {reject_title}"
+        except Exception:
+            continue
     
-    # 4. CHECK: Experience requirements (STRICT - exact config value)
+    # 4. CHECK: Must be a technical role (NEW!)
+    # This prevents sales, design, HR jobs from passing
+    engineering_keywords = [
+        'engineer', 'developer', 'programmer', 'architect',
+        'software', 'ml', 'ai', 'machine learning', 'data',
+        'backend', 'frontend', 'full stack', 'devops', 'sre',
+        'platform', 'scientist', 'researcher', 'technologist'
+    ]
+    
+    has_technical_keyword = any(keyword in title for keyword in engineering_keywords)
+    if not has_technical_keyword:
+        return False, "Not a technical role"
+    
+    # 5. CHECK: Experience requirements
     check_full = PRE_FILTER_CONFIG['check_full_description']
-    text_to_check = description if check_full else description[:500]
+    text_to_check = description if (check_full and description) else description[:500]
     
     patterns = get_experience_patterns()
-    max_years = PRE_FILTER_CONFIG['max_years_experience']  # STRICT - no default
+    max_years = PRE_FILTER_CONFIG['max_years_experience']
     
     for pattern in patterns:
-        matches = re.findall(pattern, text_to_check)
-        for match in matches:
-            if isinstance(match, tuple):
-                years_list = [int(m) for m in match if m.isdigit()]
-                min_years = min(years_list) if years_list else 0
-            else:
-                min_years = int(match) if match.isdigit() else 0
-            
-            # STRICT: Use EXACT value from config (if config=2, reject 2+)
-            if min_years >= max_years:
-                return False, f"{min_years}+ years required"
+        try:
+            matches = re.findall(pattern, text_to_check)
+            for match in matches:
+                # Handle range patterns like "5-7 years"
+                if isinstance(match, tuple):
+                    years_list = [int(m) for m in match if m.isdigit()]
+                    min_years = min(years_list) if years_list else 0
+                else:
+                    min_years = int(match) if match.isdigit() else 0
+                
+                # If job requires 2+ years and max is 2, reject
+                if min_years >= max_years:
+                    return False, f"{min_years}+ years required"
+        except Exception:
+            # If regex fails, skip this pattern
+            continue
     
-    # 5. PASS: Send to Claude
+    # PASS: Job passed all filters
     return True, "Passed pre-filter"
 
 def pre_filter_jobs(jobs):
-    """Filter jobs using STRICT config values"""
+    """Filter jobs using config"""
     filtered = []
     rejected = {}
     

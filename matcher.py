@@ -199,7 +199,7 @@ LOGIC:
     return prompt
 
 def analyze_job(job, resume_profile):
-    """Analyze with STRICT prompt"""
+    """Analyze with STRICT prompt and error handling"""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     prompt = build_strict_prompt(job, resume_profile)
     
@@ -212,15 +212,28 @@ def analyze_job(job, resume_profile):
         )
         
         text = response.content[0].text.strip()
+        # Remove markdown code blocks
         text = re.sub(r'```json\s*', '', text)
         text = re.sub(r'```\s*', '', text)
         
+        # Extract JSON
         first_brace = text.find('{')
         last_brace = text.rfind('}')
         if first_brace != -1 and last_brace != -1:
             text = text[first_brace:last_brace+1]
         
         result = json.loads(text)
+        
+        # ✅ FIX: Handle None/missing values from Claude
+        # If job has no description, Claude might return null
+        if result.get('experience_required_min') is None:
+            result['experience_required_min'] = 0
+        if result.get('experience_required_max') is None:
+            result['experience_required_max'] = 0
+        if result.get('core_skills_match_percent') is None:
+            result['core_skills_match_percent'] = 0
+        if result.get('role_match_percentage') is None:
+            result['role_match_percentage'] = 0
         
         # FORCE VALIDATION - Override Claude if wrong
         max_exp = CLAUDE_FILTER_CONFIG['max_experience_required']
@@ -233,8 +246,11 @@ def analyze_job(job, resume_profile):
         
         return result
         
+    except json.JSONDecodeError as e:
+        print(f"  ❌ JSON Parse Error: {str(e)[:50]}")
+        return None
     except Exception as e:
-        print(f"  ❌ Error: {e}")
+        print(f"  ❌ Error: {str(e)[:50]}")
         return None
 # matcher.py - ADD THIS FUNCTION after analyze_job()
 
