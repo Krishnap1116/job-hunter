@@ -24,12 +24,11 @@ def should_analyze(job):
         if not keyword or not isinstance(keyword, str):
             continue
         try:
-            # Word boundary: "senior" matches "Senior Engineer" but not "Seniority"
-            pattern = r'\b' + re.escape(keyword) + r'\b'
-            if re.search(pattern, title):
+            # ✅ FIXED: Use space-padded check instead of regex to avoid special char issues
+            if f" {keyword.lower()} " in f" {title} ":
                 return False, f"Seniority: {keyword}"
         except Exception:
-            # If regex fails, skip this keyword
+            # If check fails, skip this keyword
             continue
     
     # 2. CHECK: Job type (internship, part-time, etc.)
@@ -46,25 +45,24 @@ def should_analyze(job):
         if not reject_title or not isinstance(reject_title, str):
             continue
         try:
-            # Word boundary: "data analyst" won't match "data analytics engineer"
-            pattern = r'\b' + re.escape(reject_title) + r'\b'
-            if re.search(pattern, title):
+            # ✅ FIXED: Use space-padded check instead of regex
+            if f" {reject_title.lower()} " in f" {title} ":
                 return False, f"Specific title: {reject_title}"
         except Exception:
             continue
     
-    # 4. CHECK: Must be a technical role (NEW!)
-    # This prevents sales, design, HR jobs from passing
-    engineering_keywords = [
-        'engineer', 'developer', 'programmer', 'architect',
-        'software', 'ml', 'ai', 'machine learning', 'data',
-        'backend', 'frontend', 'full stack', 'devops', 'sre',
-        'platform', 'scientist', 'researcher', 'technologist'
-    ]
+    # # 4. CHECK: Must be a technical role (NEW!)
+    # # This prevents sales, design, HR jobs from passing
+    # engineering_keywords = [
+    #     'engineer', 'developer', 'programmer', 'architect',
+    #     'software', 'ml', 'ai', 'machine learning', 'data',
+    #     'backend', 'frontend', 'full stack', 'devops', 'sre',
+    #     'platform', 'scientist', 'researcher', 'technologist'
+    # ]
     
-    has_technical_keyword = any(keyword in title for keyword in engineering_keywords)
-    if not has_technical_keyword:
-        return False, "Not a technical role"
+    # has_technical_keyword = any(keyword in title for keyword in engineering_keywords)
+    # if not has_technical_keyword:
+    #     return False, "Not a technical role"
     
     # 5. CHECK: Experience requirements
     check_full = PRE_FILTER_CONFIG['check_full_description']

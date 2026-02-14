@@ -309,28 +309,29 @@ def save_analysis(job, analysis, resume_profile_name):
             
             return False
         
-        # Save qualified
-        analyzed_sheet = sheet.worksheet("Analyzed Jobs")
+        # Calculate score
         overall_score = calculate_overall_score(analysis)
         
+        # Save to "Analyzed Jobs" sheet
+        analyzed_sheet = sheet.worksheet("Analyzed Jobs")
+        
         row = [
-            job['Job ID'],
-            job['Company'],
-            job['Title'],
-            job['URL'],
-            analysis.get('tier', ''),
-            overall_score,
-            '',
-            analysis.get('core_skills_match_percent', 0),
-            '',
-            analysis.get('final_reasoning', ''),
-            job.get('Date Found', ''),
-            '',
-            ''
+            job['Job ID'],                          # Column 1
+            job['Company'],                         # Column 2
+            job['Title'],                           # Column 3
+            job['URL'],                             # Column 4
+            analysis.get('tier', ''),               # Column 5
+            overall_score,                          # Column 6 - Score
+            '',                                     # Column 7 - Why Strong
+            analysis.get('final_reasoning', ''),   # Column 8 - Notes (FIXED)
+            job.get('Date Found', ''),              # Column 9
+            '',                                     # Column 10 - Applied
+            ''                                      # Column 11 - Status
         ]
         
-        analyzed_sheet.append_row(row)
+        analyzed_sheet.append_row(row)  # ← This IS there! Jobs ARE copied
         
+        # Update status in "Raw Jobs"
         raw_sheet = sheet.worksheet("Raw Jobs")
         cell = raw_sheet.find(job['Job ID'])
         if cell:
@@ -338,6 +339,7 @@ def save_analysis(job, analysis, resume_profile_name):
         
         print(f"  ✅ Tier {analysis.get('tier')} - Score: {overall_score}/100")
         return True
+        
     except Exception as e:
         print(f"  ❌ Error: {e}")
         return False
