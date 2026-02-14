@@ -1,4 +1,4 @@
-# matcher.py - UNIVERSAL JOB MATCHER
+# matcher.py - STRICT CONFIG ENFORCEMENT
 
 import anthropic
 import json
@@ -6,14 +6,9 @@ import argparse
 import time
 import re
 from sheets_helper import get_sheet
-from config import ANTHROPIC_API_KEY, RESUME_PROFILES, get_resume_profile
+from config import ANTHROPIC_API_KEY, get_resume_profile
 from pre_filter import pre_filter_jobs
-from filters_config import (
-    CLAUDE_FILTER_CONFIG, 
-    should_use_strict_role_matching, 
-    COST_CONFIG,
-    OUTPUT_CONFIG
-)
+from filters_config import CLAUDE_FILTER_CONFIG, should_use_strict_role_matching, PRE_FILTER_CONFIG
 
 def get_unanalyzed_jobs(limit=None):
     """Get jobs with Status='Raw' from today"""
@@ -52,124 +47,129 @@ def get_unanalyzed_jobs(limit=None):
         print(f"❌ Error: {e}")
         return []
 
-def build_dynamic_prompt(job, resume_profile):
-    """Build universally applicable prompt based on config"""
+def build_strict_prompt(job, resume_profile):
+    """Build prompt using STRICT config values (NO defaults)"""
     
+    # STRICT: Get values directly from config - NO .get() with defaults
     cfg = CLAUDE_FILTER_CONFIG
-    max_exp = cfg.get('max_experience_required', 5)
-    min_skill = cfg.get('min_skill_match_percent', 60)
+    max_exp = cfg['max_experience_required']  # STRICT
+    min_skill = cfg['min_skill_match_percent']  # STRICT
+    tier1_threshold = cfg['tier1_skill_threshold']  # STRICT
+    tier2_threshold = cfg['tier2_skill_threshold']  # STRICT
+    
     use_strict_role, min_role_pct = should_use_strict_role_matching(resume_profile)
     
-    # Build experience rules
-    exp_rules = f"""Analyze experience requirements:
-   
-   REJECT if job requires >= {max_exp} years and states it as REQUIRED
-   ACCEPT if:
-   - States 0-{max_exp-1} years
-   - Says "X years preferred" (not required) where X <= {max_exp+1}
-   - Has multiple tracks with one being entry/junior level
-   
-   Candidate experience: {resume_profile.get('experience_years', 'N/A')}
-   If minimum requirement >= {max_exp} years → set candidate_qualifies_experience = false
+    # Build STRICT experience rules
+    # If max_exp=3, accepts 0-2 years (not 0-3)
+    exp_rules = f"""CRITICAL - EXPERIENCE (STRICT):
+
+AUTOMATIC REJECTION if job contains:
+- "minimum {max_exp} years" or higher
+- "{max_exp}+ years required" or higher
+- "requires {max_exp} years" or higher
+- "{max_exp}-{max_exp+2} years" or higher
+- ANY number >= {max_exp} in requirements
+
+ONLY QUALIFY if:
+- "0-{max_exp-1} years" (example: "0-2 years" if max={max_exp})
+- "entry level" or "junior" or "new grad"
+- "X years preferred" (NOT required) where X <= {max_exp}
+- Multiple tracks: senior ({max_exp}+) AND junior (0-{max_exp-1})
+
+Candidate: {resume_profile.get('experience_years')}
+Config max: {max_exp} years
+
+RULE: If ANY number >= {max_exp} in requirements → candidate_qualifies_experience = false
 """
 
-    # Build role matching rules
+    # Build role rules
     target_roles = resume_profile.get('target_roles', [])
+    
     if use_strict_role and min_role_pct:
-        role_rules = f"""Target roles: {', '.join(target_roles)}
-   
-   Calculate what % of job responsibilities match these target roles.
-   REJECT if role_match_percentage < {min_role_pct}%
-   
-   Example: If target is "Marketing Manager" but job is 80% Sales + 20% Marketing → REJECT
+        role_rules = f"""ROLE RELEVANCE (STRICT {min_role_pct}%):
+
+Target: {', '.join(target_roles)}
+Calculate: what % of job is target role work
+REJECT if < {min_role_pct}%
 """
     else:
-        role_rules = f"""Target roles: {', '.join(target_roles)}
-   
-   ACCEPT if job is related to target roles or uses candidate's core skills
-   REJECT if job is completely unrelated
+        role_rules = f"""Target: {', '.join(target_roles)}
+ACCEPT if related or uses core skills
 """
     
-    # Check for forbidden keywords
+    # Forbidden keywords
     forbidden = resume_profile.get('forbidden_keywords', [])
     if forbidden:
-        role_rules += f"\n   AUTO-REJECT if job title contains: {', '.join(forbidden)}"
+        role_rules += f"\nAUTO-REJECT if title contains: {', '.join(forbidden)}"
     
-    # Build employment rules
+    # Employment rules (STRICT - no .get() with defaults)
     employment_types = ["Full-time", "FTE", "Permanent"]
-    if cfg.get('accept_contract_to_hire', False):
+    if cfg['accept_contract_to_hire']:
         employment_types.append("Contract-to-hire (converts to FTE)")
-    if cfg.get('accept_contract_w2', False):
+    if cfg['accept_contract_w2']:
         employment_types.append("W2 Contract")
-    if cfg.get('accept_part_time', False):
+    if cfg['accept_part_time']:
         employment_types.append("Part-time")
     
     reject_types = []
-    if cfg.get('reject_internships', True):
+    if cfg['reject_internships']:
         reject_types.append("Internship")
-    reject_types.extend(["1099 contractor", "Freelance", "Temporary"])
+    reject_types.extend(["1099", "Freelance", "Temporary"])
     
     employment_rules = f"""ACCEPT: {', '.join(employment_types)}
-   REJECT: {', '.join(reject_types)}"""
+REJECT: {', '.join(reject_types)}"""
     
-    # Build visa rules
-    if cfg.get('requires_visa_sponsorship', True):
-        visa_rules = """REJECT if job states:
-   - "US citizenship required"
-   - "Security clearance required"  
-   - "No visa sponsorship"
-   - "Cannot sponsor"
-   
-   ACCEPT: Everything else (assume sponsorship possible if not mentioned)"""
+    # Visa rules (STRICT)
+    if cfg['requires_visa_sponsorship']:
+        auto_reject_phrases = cfg['auto_reject_phrases']
+        visa_rules = "AUTO-REJECT if job contains:\n" + '\n'.join(f'   - "{phrase}"' for phrase in auto_reject_phrases)
+        visa_rules += "\nACCEPT: Everything else"
     else:
-        visa_rules = """Candidate has work authorization - no visa restrictions
-   Can accept jobs with clearance requirements if qualified"""
+        visa_rules = "Candidate has work authorization"
     
-    # Build location rules
-    if cfg.get('accept_remote_only', False):
-        location_rules = "\nREJECT if not fully remote (must be 100% remote position)"
-    else:
-        location_rules = ""
+    # Location rules (STRICT)
+    location_rules = ""
+    if cfg['accept_remote_only']:
+        location_rules = "\nREJECT if not 100% remote"
     
-    # Full prompt
-    prompt = f"""Analyze if this candidate qualifies for this job.
+    # Build full prompt
+    prompt = f"""Analyze if candidate qualifies. Use STRICT config values.
 
-CANDIDATE PROFILE:
-Name: {resume_profile.get('name', 'N/A')}
-Experience: {resume_profile.get('experience_years', 'N/A')}
-Description: {resume_profile.get('description', 'N/A')}
-Core Skills: {', '.join(resume_profile.get('core_skills', [])[:15])}
-Target Roles: {', '.join(target_roles)}
+CANDIDATE:
+Name: {resume_profile.get('name')}
+Experience: {resume_profile.get('experience_years')}
+Core Skills: {', '.join(resume_profile.get('core_skills', [])[:20])}
+Target: {', '.join(target_roles)}
 
-JOB POSTING:
-Company: {job['Company']}
-Title: {job['Title']}
-Description: {job['Description'][:3000]}
+JOB:
+Company: {job.get('Company')}
+Title: {job.get('Title')}
+Description: {job.get('Description', '')[:3000]}
 
-QUALIFICATION CRITERIA:
+STRICT RULES:
 
 1. EXPERIENCE:
 {exp_rules}
 
-2. ROLE MATCH:
+2. ROLE:
 {role_rules}
 
 3. SKILLS:
-   Minimum required: {min_skill}% of job's required skills
-   Tier 1: >= {cfg.get('tier1_skill_threshold', 80)}% match
-   Tier 2: >= {cfg.get('tier2_skill_threshold', 60)}% match
+Min: {min_skill}%
+Tier 1: >= {tier1_threshold}%
+Tier 2: >= {tier2_threshold}%
 
-4. EMPLOYMENT TYPE:
+4. EMPLOYMENT:
 {employment_rules}
 
-5. VISA/LOCATION:
+5. VISA:
 {visa_rules}{location_rules}
 
 Return ONLY JSON:
 {{
   "experience_required_min": number,
   "candidate_qualifies_experience": boolean,
-  "experience_reasoning": "explanation",
+  "experience_reasoning": "why",
   
   "employment_type": "string",
   "candidate_qualifies_employment": boolean,
@@ -177,11 +177,11 @@ Return ONLY JSON:
   "visa_friendly": boolean,
   "candidate_qualifies_visa": boolean,
   
-  "role_match_percentage": number 0-100,
-  "primary_role": "main job function",
+  "role_match_percentage": number,
+  "primary_role": "string",
   "relevant": boolean,
   
-  "core_skills_match_percent": number 0-100,
+  "core_skills_match_percent": number,
   "ats_safe": boolean,
   
   "overall_qualified": boolean,
@@ -189,15 +189,19 @@ Return ONLY JSON:
   "final_reasoning": "summary"
 }}
 
-overall_qualified = experience AND employment AND visa AND relevant AND ats_safe
+LOGIC:
+- experience_required_min >= {max_exp} → candidate_qualifies_experience = false
+- role_match_percentage < {min_role_pct if min_role_pct else 50} → relevant = false
+- core_skills_match_percent < {min_skill} → ats_safe = false
+- overall_qualified = ALL true
 """
     
     return prompt
 
 def analyze_job(job, resume_profile):
-    """Analyze job with Claude"""
+    """Analyze with STRICT prompt"""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    prompt = build_dynamic_prompt(job, resume_profile)
+    prompt = build_strict_prompt(job, resume_profile)
     
     try:
         response = client.messages.create(
@@ -216,19 +220,60 @@ def analyze_job(job, resume_profile):
         if first_brace != -1 and last_brace != -1:
             text = text[first_brace:last_brace+1]
         
-        return json.loads(text)
+        result = json.loads(text)
+        
+        # FORCE VALIDATION - Override Claude if wrong
+        max_exp = CLAUDE_FILTER_CONFIG['max_experience_required']
+        exp_min = result.get('experience_required_min', 0)
+        
+        if exp_min >= max_exp and result.get('candidate_qualifies_experience'):
+            print(f"    ⚠️  OVERRIDE: {exp_min}+ years but Claude said qualified - REJECTING")
+            result['candidate_qualifies_experience'] = False
+            result['overall_qualified'] = False
+        
+        return result
         
     except Exception as e:
         print(f"  ❌ Error: {e}")
         return None
+# matcher.py - ADD THIS FUNCTION after analyze_job()
 
+def calculate_overall_score(analysis):
+    """
+    Calculate overall match score 0-100 based on multiple factors
+    """
+    if not analysis:
+        return 0
+    
+    score = 0
+    
+    # 1. Skills match (40% weight)
+    skills_pct = analysis.get('core_skills_match_percent', 0)
+    score += (skills_pct * 0.4)
+    
+    # 2. Role relevance (30% weight)
+    role_pct = analysis.get('role_match_percentage', 0)
+    score += (role_pct * 0.3)
+    
+    # 3. Experience qualification (20% weight)
+    if analysis.get('candidate_qualifies_experience', False):
+        score += 20
+    
+    # 4. Visa friendly (5% weight)
+    if analysis.get('candidate_qualifies_visa', False):
+        score += 5
+    
+    # 5. Employment type (5% weight)
+    if analysis.get('candidate_qualifies_employment', False):
+        score += 5
+    
+    return int(score)
 def save_analysis(job, analysis, resume_profile_name):
-    """Save analysis results"""
+    """Save results"""
     try:
         sheet = get_sheet()
         
         if not analysis or not analysis.get('overall_qualified'):
-            # Mark as rejected
             raw_sheet = sheet.worksheet("Raw Jobs")
             cell = raw_sheet.find(job['Job ID'])
             if cell:
@@ -242,12 +287,15 @@ def save_analysis(job, analysis, resume_profile_name):
                     reasons.append(f"Role: {analysis.get('role_match_percentage', 0)}%")
                 if not analysis.get('ats_safe'):
                     reasons.append(f"Skills: {analysis.get('core_skills_match_percent', 0)}%")
-                print(f"  ❌ Rejected: {'; '.join(reasons)}")
+                if not analysis.get('candidate_qualifies_visa'):
+                    reasons.append("Visa")
+                print(f"  ❌ {'; '.join(reasons)}")
             
             return False
         
-        # Save qualified job
+        # Save qualified
         analyzed_sheet = sheet.worksheet("Analyzed Jobs")
+        overall_score = calculate_overall_score(analysis)
         
         row = [
             job['Job ID'],
@@ -255,6 +303,8 @@ def save_analysis(job, analysis, resume_profile_name):
             job['Title'],
             job['URL'],
             analysis.get('tier', ''),
+            overall_score,
+            '',
             analysis.get('core_skills_match_percent', 0),
             '',
             analysis.get('final_reasoning', ''),
@@ -265,17 +315,15 @@ def save_analysis(job, analysis, resume_profile_name):
         
         analyzed_sheet.append_row(row)
         
-        # Update status
         raw_sheet = sheet.worksheet("Raw Jobs")
         cell = raw_sheet.find(job['Job ID'])
         if cell:
             raw_sheet.update_cell(cell.row, 8, 'Analyzed')
         
-        print(f"  ✅ Tier {analysis.get('tier')} - {analysis.get('core_skills_match_percent')}% match")
+        print(f"  ✅ Tier {analysis.get('tier')} - Score: {overall_score}/100")
         return True
-        
     except Exception as e:
-        print(f"  ❌ Save error: {e}")
+        print(f"  ❌ Error: {e}")
         return False
 
 def main():
@@ -286,9 +334,15 @@ def main():
     
     resume_profile = get_resume_profile(args.profile)
     
+    # Display STRICT config values being used
     print("=" * 80)
-    print(f"🤖 JOB MATCHER - Profile: {resume_profile.get('name')}")
+    print(f"🤖 STRICT MATCHER - Profile: {resume_profile.get('name')}")
     print(f"Target: {', '.join(resume_profile.get('target_roles', [])[:3])}")
+    print("\nSTRICT CONFIG VALUES:")
+    print(f"  Pre-filter max exp: {PRE_FILTER_CONFIG['max_years_experience']} years")
+    print(f"  Claude max exp: {CLAUDE_FILTER_CONFIG['max_experience_required']} years")
+    print(f"  Min skill match: {CLAUDE_FILTER_CONFIG['min_skill_match_percent']}%")
+    print(f"  Role match: {CLAUDE_FILTER_CONFIG['min_target_role_percentage']}%")
     print("=" * 80)
     
     jobs = get_unanalyzed_jobs(args.limit if args.limit > 0 else None)
@@ -304,8 +358,7 @@ def main():
         print("\n❌ All rejected by pre-filter")
         return
     
-    cost = len(jobs_to_analyze) * COST_CONFIG.get('cost_per_job_analysis', 0.001)
-    print(f"\n🤖 ANALYZING {len(jobs_to_analyze)} jobs (${cost:.2f})...")
+    print(f"\n🤖 ANALYZING {len(jobs_to_analyze)} jobs...")
     
     tier1, tier2, rejected = 0, 0, 0
     

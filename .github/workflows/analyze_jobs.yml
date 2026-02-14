@@ -11,6 +11,7 @@ on:
         type: choice
         options:
           - ml_engineer
+          - swe
         default: 'ml_engineer'
       analyze_all:
         description: 'Analyze all jobs from today?'
