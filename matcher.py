@@ -136,15 +136,15 @@ REJECT: {', '.join(reject_types)}"""
     prompt = f"""Analyze if candidate qualifies. Use STRICT config values.
 
 CANDIDATE:
-Name: {resume_profile.get('name')}
+# Name: {resume_profile.get('name')}
 Experience: {resume_profile.get('experience_years')}
-Core Skills: {', '.join(resume_profile.get('core_skills', [])[:20])}
+Core Skills: {', '.join(resume_profile.get('core_skills', [])[:])}
 Target: {', '.join(target_roles)}
 
 JOB:
 Company: {job.get('Company')}
 Title: {job.get('Title')}
-Description: {job.get('Description', '')[:3000]}
+Description: {job.get('Description', '')[:]}
 
 STRICT RULES:
 
@@ -285,9 +285,32 @@ def calculate_overall_score(analysis):
     
     return int(score)
 def save_analysis(job, analysis, resume_profile_name):
-    """Save results"""
+    """Save results with STRICT validation override"""
     try:
         sheet = get_sheet()
+        
+        # ✅ STRICT VALIDATION: Don't trust Claude's overall_qualified
+        if analysis:
+            # Check ALL conditions manually
+            passes_experience = analysis.get('candidate_qualifies_experience', False)
+            passes_role = analysis.get('relevant', False)
+            passes_skills = analysis.get('ats_safe', False)
+            passes_visa = analysis.get('candidate_qualifies_visa', False)
+            passes_employment = analysis.get('candidate_qualifies_employment', False)
+            
+            # ALL must be true
+            is_actually_qualified = (
+                passes_experience and
+                passes_role and
+                passes_skills and
+                passes_visa and
+                passes_employment
+            )
+            
+            # Override Claude if it made a mistake
+            if not is_actually_qualified and analysis.get('overall_qualified'):
+                print(f"    ⚠️  OVERRIDE: Claude said qualified but failed checks - REJECTING")
+                analysis['overall_qualified'] = False
         
         if not analysis or not analysis.get('overall_qualified'):
             raw_sheet = sheet.worksheet("Raw Jobs")
@@ -305,6 +328,8 @@ def save_analysis(job, analysis, resume_profile_name):
                     reasons.append(f"Skills: {analysis.get('core_skills_match_percent', 0)}%")
                 if not analysis.get('candidate_qualifies_visa'):
                     reasons.append("Visa")
+                if not analysis.get('candidate_qualifies_employment'):
+                    reasons.append("Employment")
                 print(f"  ❌ {'; '.join(reasons)}")
             
             return False
@@ -316,20 +341,20 @@ def save_analysis(job, analysis, resume_profile_name):
         analyzed_sheet = sheet.worksheet("Analyzed Jobs")
         
         row = [
-            job['Job ID'],                          # Column 1
-            job['Company'],                         # Column 2
-            job['Title'],                           # Column 3
-            job['URL'],                             # Column 4
-            analysis.get('tier', ''),               # Column 5
-            overall_score,                          # Column 6 - Score
-            '',                                     # Column 7 - Why Strong
-            analysis.get('final_reasoning', ''),   # Column 8 - Notes (FIXED)
-            job.get('Date Found', ''),              # Column 9
-            '',                                     # Column 10 - Applied
-            ''                                      # Column 11 - Status
+            job['Job ID'],
+            job['Company'],
+            job['Title'],
+            job['URL'],
+            analysis.get('tier', ''),
+            overall_score,
+            '',
+            analysis.get('final_reasoning', ''),
+            job.get('Date Found', ''),
+            '',
+            ''
         ]
         
-        analyzed_sheet.append_row(row)  # ← This IS there! Jobs ARE copied
+        analyzed_sheet.append_row(row)
         
         # Update status in "Raw Jobs"
         raw_sheet = sheet.worksheet("Raw Jobs")
