@@ -221,7 +221,7 @@ def fetch_adzuna_jobs():
                     'job_id': job_id,
                     'company': company,
                     'title': title,
-                    'description': description[:3000],
+                    'description': description[:],
                     'url': job_url,
                     'location': location,
                     'source': 'Adzuna',
@@ -284,7 +284,7 @@ def fetch_remoteok_jobs():
                     'job_id': job_id,
                     'company': company,
                     'title': title,
-                    'description': description[:3000],
+                    'description': description[:],
                     'url': job_url,
                     'location': location,
                     'source': 'RemoteOK',
@@ -338,7 +338,7 @@ def fetch_himalayas_jobs():
                 'job_id': job_id,
                 'company': company,
                 'title': title,
-                'description': description[:3000],
+                'description': description[:],
                 'url': job_url,
                 'location': location_str,
                 'source': 'Himalayas',
@@ -371,7 +371,7 @@ def fetch_rss_jobs():
                 title = title_parts[1] if len(title_parts) > 1 else title_parts[0]
                 
                 job_url = entry.link
-                description = entry.get('summary', '')[:3000]
+                description = entry.get('summary', '')[:]
                 
                 # Basic location check from description
                 if description and not is_usa_location(description):
@@ -429,7 +429,7 @@ def fetch_google_jobs():
                     'job_id': job_id,
                     'company': 'Google',
                     'title': job['title'],
-                    'description': job.get('description', '')[:3000],
+                    'description': job.get('description', '')[:],
                     'url': f"https://careers.google.com/jobs/results/{job['id']}/",
                     'location': ', '.join(job.get('locations', [])),
                     'source': 'Google-Direct',
@@ -469,7 +469,7 @@ def fetch_apple_jobs():
                     'job_id': job_id,
                     'company': 'Apple',
                     'title': job['postingTitle'],
-                    'description': job.get('jobSummary', '')[:3000],
+                    'description': job.get('jobSummary', '')[:],
                     'url': f"https://jobs.apple.com/en-us/details/{job['positionId']}",
                     'location': job.get('locations', ''),
                     'source': 'Apple-Direct',
@@ -510,7 +510,7 @@ def fetch_amazon_jobs():
                     'job_id': job_id,
                     'company': 'Amazon',
                     'title': job['title'],
-                    'description': job.get('description', '')[:3000],
+                    'description': job.get('description', '')[:],
                     'url': f"https://www.amazon.jobs{job['job_path']}",
                     'location': job.get('location', ''),
                     'source': 'Amazon-Direct',
