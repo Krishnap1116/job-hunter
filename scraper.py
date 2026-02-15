@@ -153,7 +153,7 @@ def fetch_jsearch_jobs():
                     'job_id': job_id,
                     'company': company,
                     'title': title,
-                    'description': description[:3000],
+                    'description': description[:],
                     'url': job_url,
                     'location': location,
                     'source': 'JSearch',

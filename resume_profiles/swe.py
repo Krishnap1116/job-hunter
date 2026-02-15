@@ -58,10 +58,8 @@ RESUME_PROFILE = {
 ],
     
     "target_roles": [
-        "Backend Engineer",
         "Full Stack Engineer",
         "Software Engineer",
-        "Data Engineer",
         "API Developer"
 ],
     
