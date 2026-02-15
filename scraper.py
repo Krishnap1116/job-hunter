@@ -646,7 +646,7 @@ def fetch_lever_jobs():
     return jobs
 
 def fetch_simplify_github():
-    """SimplifyJobs with full description scraping"""
+    """SimplifyJobs with date filtering FIRST"""
     jobs = []
     print("📥 SimplifyJobs...")
     
@@ -657,7 +657,17 @@ def fetch_simplify_github():
         if response.status_code != 200:
             return jobs
         
-        for job in response.json()[:]:  # Process up to 100
+        current_time = datetime.now().timestamp()
+        
+        for job in response.json()[:100]:
+            
+            # ✅ CHECK DATE FIRST (before anything else!)
+            date_posted = job.get('date_posted', 0)
+            if date_posted:
+                hours_ago = (current_time - date_posted) / 3600
+                if hours_ago > 24:
+                    continue  # ← Skip old jobs WITHOUT opening URL!
+            
             # 1. CHECK: Active
             if not job.get('active', False):
                 continue
@@ -668,12 +678,12 @@ def fetch_simplify_github():
             if not is_usa_location(location_str):
                 continue
             
-            # 3. CHECK: Sponsorship (must NOT be "Does not offer sponsorship")
+            # 3. CHECK: Sponsorship
             sponsorship = job.get('sponsorship', '')
             if sponsorship != "Other":
                 continue
             
-            # Passed all filters - now fetch description
+            # ALL CHECKS PASSED - Now scrape description
             company = job.get('company_name', '')
             title = job.get('title', '')
             job_url = job.get('url', '')
@@ -683,8 +693,8 @@ def fetch_simplify_github():
             
             print(f"  🔍 Fetching: {company} - {title}")
             
-            # 4. SCRAPE: Get description from URL
-            description = f"New grad position at {company}. "  # Fallback
+            # Scrape description from URL
+            description = f"New grad position at {company}. "
             
             try:
                 page_response = requests.get(job_url, timeout=10, headers={
@@ -694,10 +704,7 @@ def fetch_simplify_github():
                 if page_response.status_code == 200:
                     soup = BeautifulSoup(page_response.text, 'html.parser')
                     
-                    # Try multiple common selectors for job descriptions
-                    desc_elem = None
-                    
-                    # Try common class/id patterns
+                    # Try common selectors
                     selectors = [
                         {'class': 'description'},
                         {'class': 'job-description'},
@@ -707,39 +714,32 @@ def fetch_simplify_github():
                         {'class': 'posting-description'},
                     ]
                     
+                    desc_elem = None
                     for selector in selectors:
                         desc_elem = soup.find('div', selector)
                         if desc_elem:
                             break
                     
-                    # If not found, try to find largest text block
-                    if not desc_elem:
-                        # Find all divs and get the one with most text
-                        all_divs = soup.find_all('div')
-                        if all_divs:
-                            desc_elem = max(all_divs, key=lambda d: len(d.get_text()))
-                    
                     if desc_elem:
-                        description = desc_elem.get_text(separator=' ', strip=True)[:]
-                        print(f"  ✅ {company} - {title} (scraped description)")
+                        description = desc_elem.get_text(separator=' ', strip=True)[:5000]
+                        print(f"  ✅ {company} - {title}")
                     else:
-                        print(f"  ⚠️  {company} - {title} (no description found)")
-                        description = f"New grad position at {company}. Location: {location_str}. No detailed description available."
+                        print(f"  ⚠️  {company} - No description found")
+                        description = f"New grad position at {company}. Location: {location_str}."
                 else:
-                    print(f"  ⚠️  {company} - Failed to fetch URL (status {page_response.status_code})")
+                    print(f"  ⚠️  Failed to fetch (status {page_response.status_code})")
             
             except Exception as e:
-                print(f"  ⚠️  {company} - Error scraping: {str(e)[:50]}")
+                print(f"  ⚠️  Error: {str(e)[:50]}")
                 description = f"New grad position at {company}. Location: {location_str}."
             
-            # Create job entry
             job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
             
             jobs.append({
                 'job_id': job_id,
                 'company': company,
                 'title': title,
-                'description': description,  # ✅ SCRAPED DESCRIPTION
+                'description': description,
                 'url': job_url,
                 'location': location_str,
                 'source': 'SimplifyJobs',
@@ -747,7 +747,6 @@ def fetch_simplify_github():
                 'status': 'Raw'
             })
             
-            # Be nice to servers - delay between scrapes
             time.sleep(2)
         
         print(f"  ✅ {len(jobs)} jobs from SimplifyJobs")
@@ -835,7 +834,7 @@ def main():
     # LAYER 4: ATS APIs
     all_jobs.extend(fetch_greenhouse_jobs())
     all_jobs.extend(fetch_lever_jobs())
-    # all_jobs.extend(fetch_simplify_github())
+    all_jobs.extend(fetch_simplify_github())
     
     print(f"\n📊 Total collected: {len(all_jobs)} jobs")
     
