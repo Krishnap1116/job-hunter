@@ -9,7 +9,84 @@ from sheets_helper import get_sheet
 from config import ANTHROPIC_API_KEY, get_resume_profile
 from pre_filter import pre_filter_jobs
 from filters_config import CLAUDE_FILTER_CONFIG, should_use_strict_role_matching, PRE_FILTER_CONFIG
+# At the top after imports
 
+def extract_relevant_sections(description, max_chars=4500):
+    """
+    Extract only relevant sections for job matching.
+    Skips company info, benefits, culture fluff.
+    """
+    if len(description) <= max_chars:
+        return description
+    
+    lines = description.split('\n')
+    
+    # Important keywords
+    important_kw = [
+        'requirement', 'required', 'must have',
+        'qualification', 'qualified', 
+        'experience', 'years', 'background',
+        'skill', 'technical', 'proficiency',
+        'education', 'degree', 'bachelor', 'master',
+        'responsibility', 'duties', 'you will',
+        'preferred', 'desired', 'bonus'
+    ]
+    
+    # Skip keywords
+    skip_kw = [
+        'about us', 'our company', 'culture', 'mission',
+        'values', 'why join', 'perks', 'benefits',
+        'we offer', 'compensation', 'salary', 'insurance',
+        'equal opportunity', 'diversity'
+    ]
+    
+    important_lines = []
+    current_section = []
+    is_important = False
+    
+    for line in lines:
+        line_lower = line.lower().strip()
+        
+        if not line_lower:
+            if current_section and is_important:
+                important_lines.extend(current_section)
+            current_section = []
+            is_important = False
+            continue
+        
+        # Check if header
+        is_header = (
+            len(line_lower) < 100 and
+            (line.isupper() or line.endswith(':') or 
+             line.startswith('#') or line.startswith('**'))
+        )
+        
+        if is_header:
+            if current_section and is_important:
+                important_lines.extend(current_section)
+            
+            current_section = [line]
+            is_important = any(kw in line_lower for kw in important_kw)
+            
+            if any(kw in line_lower for kw in skip_kw):
+                is_important = False
+        else:
+            current_section.append(line)
+            if any(kw in line_lower for kw in important_kw):
+                is_important = True
+    
+    if current_section and is_important:
+        important_lines.extend(current_section)
+    
+    extracted = '\n'.join(important_lines)
+    
+    if len(extracted) > max_chars:
+        extracted = extracted[:max_chars] + "\n[Truncated]"
+    elif len(extracted) < 200:
+        # Fallback
+        extracted = description[:2500] + "\n...\n" + description[-1500:]
+    
+    return extracted
 def get_unanalyzed_jobs(limit=None):
     """Get jobs with Status='Raw' from today"""
     from datetime import datetime, timedelta
@@ -56,7 +133,7 @@ def build_strict_prompt(job, resume_profile):
     min_skill = cfg['min_skill_match_percent']  # STRICT
     tier1_threshold = cfg['tier1_skill_threshold']  # STRICT
     tier2_threshold = cfg['tier2_skill_threshold']  # STRICT
-    
+    job_description = extract_relevant_sections(job.get('Description', ''))
     use_strict_role, min_role_pct = should_use_strict_role_matching(resume_profile)
     
     # Build STRICT experience rules
@@ -150,7 +227,7 @@ Target: {', '.join(target_roles)}
 JOB:
 Company: {job.get('Company')}
 Title: {job.get('Title')}
-Description: {job.get('Description', '')[:]}
+Description: {job_description}
 
 STRICT RULES:
 
