@@ -835,7 +835,7 @@ def main():
     # LAYER 4: ATS APIs
     all_jobs.extend(fetch_greenhouse_jobs())
     all_jobs.extend(fetch_lever_jobs())
-    all_jobs.extend(fetch_simplify_github())
+    # all_jobs.extend(fetch_simplify_github())
     
     print(f"\n📊 Total collected: {len(all_jobs)} jobs")
     
