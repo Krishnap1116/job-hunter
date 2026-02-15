@@ -530,7 +530,7 @@ def fetch_amazon_jobs():
 # ==================== LAYER 4: ATS APIs ====================
 
 def fetch_greenhouse_jobs():
-    """Greenhouse company boards"""
+    """Greenhouse with full descriptions"""
     jobs = []
     print("📥 Greenhouse...")
     
@@ -547,6 +547,14 @@ def fetch_greenhouse_jobs():
                 job_url = job.get('absolute_url', '')
                 location = job.get('location', {}).get('name', '')
                 
+                # Get full description
+                content = job.get('content', '')
+                if content:
+                    # Strip HTML
+                    clean_description = BeautifulSoup(content, 'html.parser').get_text()[:]
+                else:
+                    clean_description = f"Location: {location}. No description available."
+                
                 if not job_url or not is_usa_location(location):
                     continue
                 
@@ -558,7 +566,7 @@ def fetch_greenhouse_jobs():
                     'job_id': job_id,
                     'company': company_id.title(),
                     'title': title,
-                    'description': f"Location: {location}",
+                    'description': clean_description,
                     'url': job_url,
                     'location': location,
                     'source': 'Greenhouse',
@@ -575,7 +583,7 @@ def fetch_greenhouse_jobs():
     return jobs
 
 def fetch_lever_jobs():
-    """Lever company boards"""
+    """Lever with full descriptions"""
     jobs = []
     print("📥 Lever...")
     
@@ -592,6 +600,24 @@ def fetch_lever_jobs():
                 job_url = job.get('hostedUrl', '')
                 location = job.get('categories', {}).get('location', '')
                 
+                # Get description lists
+                desc_parts = []
+                if job.get('description'):
+                    desc_parts.append(job.get('description'))
+                if job.get('lists'):
+                    for list_item in job.get('lists', []):
+                        if list_item.get('text'):
+                            desc_parts.append(list_item.get('text'))
+                        if list_item.get('content'):
+                            desc_parts.append(list_item.get('content'))
+                
+                # Combine and clean
+                if desc_parts:
+                    full_desc = ' '.join(desc_parts)
+                    clean_description = BeautifulSoup(full_desc, 'html.parser').get_text()[:]
+                else:
+                    clean_description = f"Location: {location}. No description available."
+                
                 if not job_url or not is_usa_location(location):
                     continue
                 
@@ -603,7 +629,7 @@ def fetch_lever_jobs():
                     'job_id': job_id,
                     'company': company_id.title(),
                     'title': title,
-                    'description': f"Location: {location}",
+                    'description': clean_description,
                     'url': job_url,
                     'location': location,
                     'source': 'Lever',
@@ -620,7 +646,7 @@ def fetch_lever_jobs():
     return jobs
 
 def fetch_simplify_github():
-    """SimplifyJobs curated list"""
+    """SimplifyJobs with full description scraping"""
     jobs = []
     print("📥 SimplifyJobs...")
     
@@ -631,35 +657,98 @@ def fetch_simplify_github():
         if response.status_code != 200:
             return jobs
         
-        for job in response.json()[:100]:
-            company = job.get('company_name', '')
-            title = job.get('title', '')
-            locations = job.get('locations', [])
-            job_url = job.get('url', '')
-            active = job.get('active', True)
-            
-            if not active or not job_url:
+        for job in response.json()[:]:  # Process up to 100
+            # 1. CHECK: Active
+            if not job.get('active', False):
                 continue
             
+            # 2. CHECK: USA Location
+            locations = job.get('locations', [])
             location_str = ' '.join(locations) if isinstance(locations, list) else str(locations)
             if not is_usa_location(location_str):
                 continue
             
-            print(f"  ✅ {company} - {title}")
+            # 3. CHECK: Sponsorship (must NOT be "Does not offer sponsorship")
+            sponsorship = job.get('sponsorship', '')
+            if sponsorship != "Other":
+                continue
             
+            # Passed all filters - now fetch description
+            company = job.get('company_name', '')
+            title = job.get('title', '')
+            job_url = job.get('url', '')
+            
+            if not job_url:
+                continue
+            
+            print(f"  🔍 Fetching: {company} - {title}")
+            
+            # 4. SCRAPE: Get description from URL
+            description = f"New grad position at {company}. "  # Fallback
+            
+            try:
+                page_response = requests.get(job_url, timeout=10, headers={
+                    'User-Agent': 'Mozilla/5.0 (compatible; JobBot/1.0)'
+                })
+                
+                if page_response.status_code == 200:
+                    soup = BeautifulSoup(page_response.text, 'html.parser')
+                    
+                    # Try multiple common selectors for job descriptions
+                    desc_elem = None
+                    
+                    # Try common class/id patterns
+                    selectors = [
+                        {'class': 'description'},
+                        {'class': 'job-description'},
+                        {'id': 'job-description'},
+                        {'class': 'content'},
+                        {'class': 'job-details'},
+                        {'class': 'posting-description'},
+                    ]
+                    
+                    for selector in selectors:
+                        desc_elem = soup.find('div', selector)
+                        if desc_elem:
+                            break
+                    
+                    # If not found, try to find largest text block
+                    if not desc_elem:
+                        # Find all divs and get the one with most text
+                        all_divs = soup.find_all('div')
+                        if all_divs:
+                            desc_elem = max(all_divs, key=lambda d: len(d.get_text()))
+                    
+                    if desc_elem:
+                        description = desc_elem.get_text(separator=' ', strip=True)[:]
+                        print(f"  ✅ {company} - {title} (scraped description)")
+                    else:
+                        print(f"  ⚠️  {company} - {title} (no description found)")
+                        description = f"New grad position at {company}. Location: {location_str}. No detailed description available."
+                else:
+                    print(f"  ⚠️  {company} - Failed to fetch URL (status {page_response.status_code})")
+            
+            except Exception as e:
+                print(f"  ⚠️  {company} - Error scraping: {str(e)[:50]}")
+                description = f"New grad position at {company}. Location: {location_str}."
+            
+            # Create job entry
             job_id = hashlib.md5(f"{company}{title}{job_url}".encode()).hexdigest()[:8]
             
             jobs.append({
                 'job_id': job_id,
                 'company': company,
                 'title': title,
-                'description': f"Locations: {location_str}",
+                'description': description,  # ✅ SCRAPED DESCRIPTION
                 'url': job_url,
                 'location': location_str,
                 'source': 'SimplifyJobs',
                 'date_found': datetime.now().strftime('%Y-%m-%d'),
                 'status': 'Raw'
             })
+            
+            # Be nice to servers - delay between scrapes
+            time.sleep(2)
         
         print(f"  ✅ {len(jobs)} jobs from SimplifyJobs")
         
