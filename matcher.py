@@ -61,26 +61,31 @@ def build_strict_prompt(job, resume_profile):
     
     # Build STRICT experience rules
     # If max_exp=3, accepts 0-2 years (not 0-3)
+    # Build STRICT experience rules
     exp_rules = f"""CRITICAL - EXPERIENCE (STRICT):
 
 AUTOMATIC REJECTION if job contains:
 - "minimum {max_exp} years" or higher
 - "{max_exp}+ years required" or higher
 - "requires {max_exp} years" or higher
-- "{max_exp}-{max_exp+2} years" or higher
-- ANY number >= {max_exp} in requirements
-
 
 ONLY QUALIFY if:
-- "0-{max_exp} years" (example: "0-2 years" if max={max_exp})
+- "0-{max_exp-1} years" (example: "0-3 years" if max={max_exp})
 - "entry level" or "junior" or "new grad"
-- "X years preferred" (NOT required) where X <= {max_exp}
-- Multiple tracks: senior ({max_exp}+) AND junior (0-{max_exp-1})
+- "{max_exp-1} years preferred" (NOT required)
+- Multiple tracks available (e.g., "PhD OR Master's+2 OR Bachelor's+4")
 
-Candidate: {resume_profile.get('experience_years')}
+FLEXIBLE REQUIREMENTS:
+- If job says "PhD OR Master's with 2 years OR Bachelor's with 4 years"
+  AND candidate has Bachelor's with 3 years → CONSIDER QUALIFIED
+- "Preferred" or "desired" (not "required") → MORE LENIENT
+
+Candidate: {resume_profile.get('experience_years')} (max claim: {max_exp-1} years)
 Config max: {max_exp} years
 
-RULE: If ANY number >= {max_exp} in requirements → candidate_qualifies_experience = false
+RULE: 
+- Hard requirement ≥ {max_exp} → REJECT
+- Flexible requirement with {max_exp-1} to {max_exp} range → EVALUATE case-by-case
 """
 
     # Build role rules
@@ -134,11 +139,11 @@ REJECT: {', '.join(reject_types)}"""
         location_rules = "\nREJECT if not 100% remote"
     
     # Build full prompt
-    prompt = f"""Analyze if candidate qualifies. Use STRICT config values.
+    prompt = f"""Analyze if candidate qualifies. Use STRICT config values BUT evaluate flexible requirements.
 
 CANDIDATE:
-# Name: {resume_profile.get('name')}
-Experience: {resume_profile.get('experience_years')}
+Name: {resume_profile.get('name')}
+Experience: {resume_profile.get('experience_years')} (can claim up to 3 years)
 Core Skills: {', '.join(resume_profile.get('core_skills', [])[:])}
 Target: {', '.join(target_roles)}
 
@@ -151,6 +156,12 @@ STRICT RULES:
 
 1. EXPERIENCE:
 {exp_rules}
+
+SPECIAL CASES TO ACCEPT:
+- "PhD OR Master's+2 OR Bachelor's+4" where candidate has Bachelor's+3
+- "4 years preferred" (not required)
+- "3-4 years" range where candidate has 3 years
+- "Architect" title does NOT automatically mean senior (check actual requirements)
 
 2. ROLE:
 {role_rules}
@@ -191,13 +202,34 @@ Return ONLY JSON:
 }}
 
 LOGIC:
-- experience_required_min >= {max_exp} → candidate_qualifies_experience = false
-- role_match_percentage < {min_role_pct if min_role_pct else 50} → relevant = false
-- core_skills_match_percent < {min_skill} → ats_safe = false
-- overall_qualified = ALL true
+- experience_required_min >= {max_exp} AND hard requirement → candidate_qualifies_experience = false
+- experience_required_min == {max_exp} BUT flexible/preferred → EVALUATE (may accept)
+- "Architect" in title → Check description for actual years, don't auto-reject
 """
     
     return prompt
+def has_flexible_experience_requirements(job_description):
+    """
+    Detect if job has flexible experience requirements like:
+    - "PhD OR Master's+2 OR Bachelor's+4"
+    - "3-5 years preferred"
+    - "4 years desired"
+    """
+    desc = job_description.lower()
+    
+    # Check for multiple education paths
+    has_multiple_paths = (
+        ('bachelor' in desc or 'master' in desc or 'phd' in desc) and
+        ' or ' in desc and
+        ('+' in desc or 'with' in desc)
+    )
+    
+    # Check for "preferred" or "desired" language
+    has_preferred_language = any(word in desc for word in [
+        'preferred', 'desired', 'ideal', 'plus', 'nice to have'
+    ])
+    
+    return has_multiple_paths or has_preferred_language
 
 def analyze_job(job, resume_profile):
     """Analyze with STRICT prompt and error handling"""
@@ -239,11 +271,17 @@ def analyze_job(job, resume_profile):
         # FORCE VALIDATION - Override Claude if wrong
         max_exp = CLAUDE_FILTER_CONFIG['max_experience_required']
         exp_min = result.get('experience_required_min', 0)
+
+        desc = job.get('Description', '')
+        is_flexible = has_flexible_experience_requirements(desc)
         
         if exp_min >= max_exp and result.get('candidate_qualifies_experience'):
-            print(f"    ⚠️  OVERRIDE: {exp_min}+ years but Claude said qualified - REJECTING")
-            result['candidate_qualifies_experience'] = False
-            result['overall_qualified'] = False
+            if is_flexible:
+                print(f"    ℹ️  {exp_min} years with FLEXIBLE requirements - Accepting Claude's decision")
+            else:
+                print(f"    ⚠️  OVERRIDE: {exp_min}+ years HARD requirement - REJECTING")
+                result['candidate_qualifies_experience'] = False
+                result['overall_qualified'] = False
         
         return result
         
