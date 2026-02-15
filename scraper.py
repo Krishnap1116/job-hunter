@@ -530,7 +530,7 @@ def fetch_amazon_jobs():
 # ==================== LAYER 4: ATS APIs ====================
 
 def fetch_greenhouse_jobs():
-    """Greenhouse with full descriptions"""
+    """Greenhouse - filter by date first, then scrape URLs for descriptions"""
     jobs = []
     print("📥 Greenhouse...")
     
@@ -542,41 +542,83 @@ def fetch_greenhouse_jobs():
             if response.status_code != 200:
                 continue
             
-            for job in response.json().get('jobs', []):
+            job_list = response.json().get('jobs', [])
+            
+            for job in job_list:
+                # ✅ CHECK DATE FIRST (before opening URL!)
+                updated_at = job.get('updated_at', '')
+                if updated_at:
+                    try:
+                        # Parse date: "2026-02-13T12:40:11-05:00"
+                        updated_date = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+                        hours_ago = (datetime.now(updated_date.tzinfo) - updated_date).total_seconds() / 3600
+                        
+                        if hours_ago > 24:
+                            continue  # ← Skip old jobs WITHOUT opening URL
+                    except:
+                        pass  # If can't parse, include it
+                
                 title = job.get('title', '')
                 job_url = job.get('absolute_url', '')
                 location = job.get('location', {}).get('name', '')
                 
-                # Get full description
-                content = job.get('content', '')
-                if content:
-                    # Strip HTML
-                    clean_description = BeautifulSoup(content, 'html.parser').get_text()[:]
-                else:
-                    clean_description = f"Location: {location}. No description available."
-                
+                # Check USA location
                 if not job_url or not is_usa_location(location):
                     continue
                 
-                print(f"  ✅ {company_id.title()} - {title}")
+                print(f"  🔍 Scraping: {company_id.title()} - {title}")
                 
-                job_id = hashlib.md5(f"{company_id}{title}{job_url}".encode()).hexdigest()[:8]
+                # ✅ SCRAPE DESCRIPTION FROM URL
+                description = f"Location: {location}. "
+                
+                try:
+                    page_response = requests.get(job_url, timeout=10, headers={
+                        'User-Agent': 'Mozilla/5.0 (compatible; JobBot/1.0)'
+                    })
+                    
+                    if page_response.status_code == 200:
+                        soup = BeautifulSoup(page_response.text, 'html.parser')
+                        
+                        # Try common Greenhouse description selectors
+                        desc_elem = (
+                            soup.find('div', {'id': 'content'}) or
+                            soup.find('div', {'class': 'content'}) or
+                            soup.find('div', {'class': 'job-description'}) or
+                            soup.find('div', {'class': 'description'}) or
+                            soup.find('section', {'class': 'job-post'})
+                        )
+                        
+                        if desc_elem:
+                            description = desc_elem.get_text(separator=' ', strip=True)[:5000]
+                            print(f"  ✅ {company_id.title()} - {title}")
+                        else:
+                            print(f"  ⚠️  No description found")
+                            description = f"Location: {location}. No description available."
+                    else:
+                        print(f"  ⚠️  Failed (status {page_response.status_code})")
+                
+                except Exception as e:
+                    print(f"  ⚠️  Error: {str(e)[:50]}")
+                    description = f"Location: {location}."
+                
+                job_hash = hashlib.md5(f"{company_id}{title}{job_url}".encode()).hexdigest()[:8]
                 
                 jobs.append({
-                    'job_id': job_id,
+                    'job_id': job_hash,
                     'company': company_id.title(),
                     'title': title,
-                    'description': clean_description,
+                    'description': description,
                     'url': job_url,
                     'location': location,
                     'source': 'Greenhouse',
                     'date_found': datetime.now().strftime('%Y-%m-%d'),
                     'status': 'Raw'
                 })
+                
+                time.sleep(1)  # 1 second delay between scrapes
             
-            time.sleep(0.5)
-            
-        except:
+        except Exception as e:
+            print(f"  ❌ {company_id}: {e}")
             continue
     
     print(f"  ✅ {len(jobs)} jobs from Greenhouse")
