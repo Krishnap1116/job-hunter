@@ -6,7 +6,7 @@
 
 PRE_FILTER_CONFIG = {
     # Experience threshold (reject jobs requiring this many years or more)
-    "max_years_experience": 2,  # Reject "2+ years required"
+    "max_years_experience": 4,  # Reject "2+ years required"
     
     # Seniority levels to auto-reject
     "reject_seniority_levels": [
@@ -56,7 +56,7 @@ PRE_FILTER_CONFIG = {
 CLAUDE_FILTER_CONFIG = {
     # === EXPERIENCE VALIDATION ===
     "strict_experience_check": True,      # Strictly enforce experience requirements
-    "max_experience_required": 3,          # Auto-reject if job requires ≥ 3 years
+    "max_experience_required": 4,          # Auto-reject if job requires ≥ 3 years
     "allow_preferred_experience": True,    # Accept "X years preferred" (not required)
     
     # === SKILL MATCHING ===

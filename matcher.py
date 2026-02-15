@@ -70,8 +70,9 @@ AUTOMATIC REJECTION if job contains:
 - "{max_exp}-{max_exp+2} years" or higher
 - ANY number >= {max_exp} in requirements
 
+
 ONLY QUALIFY if:
-- "0-{max_exp-1} years" (example: "0-2 years" if max={max_exp})
+- "0-{max_exp} years" (example: "0-2 years" if max={max_exp})
 - "entry level" or "junior" or "new grad"
 - "X years preferred" (NOT required) where X <= {max_exp}
 - Multiple tracks: senior ({max_exp}+) AND junior (0-{max_exp-1})
