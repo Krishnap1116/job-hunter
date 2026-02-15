@@ -11,7 +11,7 @@ from pre_filter import pre_filter_jobs
 from filters_config import CLAUDE_FILTER_CONFIG, should_use_strict_role_matching, PRE_FILTER_CONFIG
 # At the top after imports
 
-def extract_relevant_sections(description, max_chars=4500):
+def extract_relevant_sections(description, max_chars=3000):
     """
     Extract only relevant sections for job matching.
     Skips company info, benefits, culture fluff.
@@ -221,7 +221,7 @@ REJECT: {', '.join(reject_types)}"""
 CANDIDATE:
 Name: {resume_profile.get('name')}
 Experience: {resume_profile.get('experience_years')} (can claim up to 3 years)
-Core Skills: {', '.join(resume_profile.get('core_skills', [])[:])}
+Core Skills: {', '.join(resume_profile.get('core_skills', [])[:20])}
 Target: {', '.join(target_roles)}
 
 JOB:
@@ -312,6 +312,7 @@ def analyze_job(job, resume_profile):
     """Analyze with STRICT prompt and error handling"""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     prompt = build_strict_prompt(job, resume_profile)
+    print(f"    Prompt length: {len(prompt)} chars")
     
     try:
         response = client.messages.create(
