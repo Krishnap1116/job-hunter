@@ -108,7 +108,7 @@ def pre_filter_jobs(jobs):
     # Print statistics
     print(f"\n📊 PRE-FILTER RESULTS:")
     print(f"  📥 Total jobs: {len(jobs)}")
-    print(f"  ✅ Passed to Claude: {len(filtered)}")
+    print(f"  ✅ Passed to OpenRouter: {len(filtered)}")
     print(f"  ❌ Rejected (free): {len(jobs) - len(filtered)}")
     
     if rejected:
