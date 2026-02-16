@@ -249,9 +249,9 @@ def analyze_job(job, resume_profile):
     
     try:
         response = client.chat.completions.create(
-            model="meta-llama/llama-3.3-70b-instruct:free",  # FREE model
+            model="meta-llama/llama-3.2-3b-instruct:free",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=500,
+            max_tokens=3500,
             temperature=0
         )
         
