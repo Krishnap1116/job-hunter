@@ -15,7 +15,7 @@ load_dotenv('.env')  # Explicitly specify .env file
 from openai import OpenAI
 
 # OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+# ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 def get_unanalyzed_jobs(limit=None):
     """Get jobs with Status='Raw' from today"""
@@ -305,7 +305,6 @@ def has_flexible_experience_requirements(job_description):
 #         return None
 def analyze_job(job, resume_profile):
     """Analyze with Claude Haiku (BEST ACCURACY)"""
-    from config import ANTHROPIC_API_KEY
     
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     prompt = build_strict_prompt(job, resume_profile)
