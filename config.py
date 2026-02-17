@@ -77,8 +77,8 @@ def list_available_profiles():
 
 # ==================== API KEYS ====================
 
-# ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+# OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
 SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 

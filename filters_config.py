@@ -53,7 +53,7 @@ PRE_FILTER_CONFIG = {
 # ==================== CLAUDE ANALYSIS SETTINGS ====================
 # These are SMART checks done by Claude (costs $0.001 per job)
 
-OPENROUTER_FILTER_CONFIG = {
+CLAUDE_FILTER_CONFIG = {
     # === EXPERIENCE VALIDATION ===
     "strict_experience_check": True,      # Strictly enforce experience requirements
     "max_experience_required": 4,          # Auto-reject if job requires ≥ 3 years
@@ -147,7 +147,7 @@ def should_use_strict_role_matching(resume_profile):
     # You have 6 target roles - all very specific to ML/AI
     # → Use strict matching
     if len(target_roles) <= 6:
-        min_pct = OPENROUTER_FILTER_CONFIG.get('min_target_role_percentage', 70)
+        min_pct = CLAUDE_FILTER_CONFIG.get('min_target_role_percentage', 70)
         return True, min_pct
     
     # Fallback for other users

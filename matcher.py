@@ -1,20 +1,21 @@
 # matcher.py - STRICT CONFIG ENFORCEMENT
 
-# import anthropic
+import anthropic
 import json
 import argparse
 import time
 import re
 from sheets_helper import get_sheet
-from config import OPENROUTER_API_KEY, get_resume_profile
+from config import ANTHROPIC_API_KEY, get_resume_profile
 from pre_filter import pre_filter_jobs
-from filters_config import OPENROUTER_FILTER_CONFIG, should_use_strict_role_matching, PRE_FILTER_CONFIG
+from filters_config import CLAUDE_FILTER_CONFIG, should_use_strict_role_matching, PRE_FILTER_CONFIG
 import os
 from dotenv import load_dotenv
 load_dotenv('.env')  # Explicitly specify .env file
 from openai import OpenAI
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 def get_unanalyzed_jobs(limit=None):
     """Get jobs with Status='Raw' from today"""
@@ -57,7 +58,7 @@ def build_strict_prompt(job, resume_profile):
     """Build prompt using STRICT config values (NO defaults)"""
     
     # STRICT: Get values directly from config - NO .get() with defaults
-    cfg = OPENROUTER_FILTER_CONFIG
+    cfg = CLAUDE_FILTER_CONFIG
     max_exp = cfg['max_experience_required']  # STRICT
     min_skill = cfg['min_skill_match_percent']  # STRICT
     tier1_threshold = cfg['tier1_skill_threshold']  # STRICT
@@ -237,30 +238,93 @@ def has_flexible_experience_requirements(job_description):
     
     return has_multiple_paths or has_preferred_language
 
+# def analyze_job(job, resume_profile):
+#     """Analyze with OpenRouter (FREE models!)"""
+    
+#     client = OpenAI(
+#         base_url="https://openrouter.ai/api/v1",
+#         api_key=OPENROUTER_API_KEY,
+#     )
+    
+#     prompt = build_strict_prompt(job, resume_profile)
+    
+#     try:
+#         response = client.chat.completions.create(
+#             model="google/gemini-flash-1.5",
+#             messages=[{"role": "user", "content": prompt}],
+#             max_tokens=3500,
+#             temperature=0
+#         )
+        
+#         text = response.choices[0].message.content.strip()
+        
+#         # Same JSON parsing as before
+#         text = re.sub(r'```json\s*', '', text)
+#         text = re.sub(r'```\s*', '', text)
+        
+#         first_brace = text.find('{')
+#         last_brace = text.rfind('}')
+#         if first_brace != -1 and last_brace != -1:
+#             text = text[first_brace:last_brace+1]
+        
+#         result = json.loads(text)
+        
+#         # ✅ FIX: Handle None/missing values from OPENROUTER
+#         # If job has no description, OPENROUTER might return null
+#         if result.get('experience_required_min') is None:
+#             result['experience_required_min'] = 0
+#         if result.get('experience_required_max') is None:
+#             result['experience_required_max'] = 0
+#         if result.get('core_skills_match_percent') is None:
+#             result['core_skills_match_percent'] = 0
+#         if result.get('role_match_percentage') is None:
+#             result['role_match_percentage'] = 0
+        
+#         # FORCE VALIDATION - Override OPENROUTER if wrong
+#         max_exp = OPENROUTER_FILTER_CONFIG['max_experience_required']
+#         exp_min = result.get('experience_required_min', 0)
+
+#         desc = job.get('Description', '')
+#         is_flexible = has_flexible_experience_requirements(desc)
+        
+#         if exp_min >= max_exp and result.get('candidate_qualifies_experience'):
+#             if is_flexible:
+#                 print(f"    ℹ️  {exp_min} years with FLEXIBLE requirements - Accepting OPENROUTER's decision")
+#             else:
+#                 print(f"    ⚠️  OVERRIDE: {exp_min}+ years HARD requirement - REJECTING")
+#                 result['candidate_qualifies_experience'] = False
+#                 result['overall_qualified'] = False
+        
+#         return result
+        
+#     except json.JSONDecodeError as e:
+#         print(f"  ❌ JSON Parse Error: {str(e)[:50]}")
+#         return None
+#     except Exception as e:
+#         print(f"  ❌ Error: {str(e)[:50]}")
+#         return None
 def analyze_job(job, resume_profile):
-    """Analyze with OpenRouter (FREE models!)"""
+    """Analyze with Claude Haiku (BEST ACCURACY)"""
+    from config import ANTHROPIC_API_KEY
     
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
-    )
-    
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     prompt = build_strict_prompt(job, resume_profile)
     
     try:
-        response = client.chat.completions.create(
-            model="meta-llama/llama-3.2-3b-instruct:free",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=3500,
-            temperature=0
+        response = client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=1000,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}]
         )
         
-        text = response.choices[0].message.content.strip()
+        text = response.content[0].text.strip()
         
-        # Same JSON parsing as before
+        # Remove markdown code blocks
         text = re.sub(r'```json\s*', '', text)
         text = re.sub(r'```\s*', '', text)
         
+        # Extract JSON
         first_brace = text.find('{')
         last_brace = text.rfind('}')
         if first_brace != -1 and last_brace != -1:
@@ -268,8 +332,7 @@ def analyze_job(job, resume_profile):
         
         result = json.loads(text)
         
-        # ✅ FIX: Handle None/missing values from OPENROUTER
-        # If job has no description, OPENROUTER might return null
+        # ✅ Handle None/missing values
         if result.get('experience_required_min') is None:
             result['experience_required_min'] = 0
         if result.get('experience_required_max') is None:
@@ -279,8 +342,9 @@ def analyze_job(job, resume_profile):
         if result.get('role_match_percentage') is None:
             result['role_match_percentage'] = 0
         
-        # FORCE VALIDATION - Override OPENROUTER if wrong
-        max_exp = OPENROUTER_FILTER_CONFIG['max_experience_required']
+        # FORCE VALIDATION - Override Claude if wrong
+        from filters_config import CLAUDE_FILTER_CONFIG
+        max_exp = CLAUDE_FILTER_CONFIG['max_experience_required']
         exp_min = result.get('experience_required_min', 0)
 
         desc = job.get('Description', '')
@@ -288,7 +352,7 @@ def analyze_job(job, resume_profile):
         
         if exp_min >= max_exp and result.get('candidate_qualifies_experience'):
             if is_flexible:
-                print(f"    ℹ️  {exp_min} years with FLEXIBLE requirements - Accepting OPENROUTER's decision")
+                print(f"    ℹ️  {exp_min} years with FLEXIBLE requirements - Accepting Claude's decision")
             else:
                 print(f"    ⚠️  OVERRIDE: {exp_min}+ years HARD requirement - REJECTING")
                 result['candidate_qualifies_experience'] = False
@@ -300,9 +364,8 @@ def analyze_job(job, resume_profile):
         print(f"  ❌ JSON Parse Error: {str(e)[:50]}")
         return None
     except Exception as e:
-        print(f"  ❌ Error: {str(e)[:50]}")
+        print(f"  ❌ Error: {str(e)[:80]}")
         return None
-# matcher.py - ADD THIS FUNCTION after analyze_job()
 
 def calculate_overall_score(analysis):
     """
@@ -446,9 +509,9 @@ def main():
     print(f"Target: {', '.join(resume_profile.get('target_roles', [])[:3])}")
     print("\nSTRICT CONFIG VALUES:")
     print(f"  Pre-filter max exp: {PRE_FILTER_CONFIG['max_years_experience']} years")
-    print(f"  OPENROUTER max exp: {OPENROUTER_FILTER_CONFIG['max_experience_required']} years")
-    print(f"  Min skill match: {OPENROUTER_FILTER_CONFIG['min_skill_match_percent']}%")
-    print(f"  Role match: {OPENROUTER_FILTER_CONFIG['min_target_role_percentage']}%")
+    print(f"  Claude max exp: {CLAUDE_FILTER_CONFIG['max_experience_required']} years")
+    print(f"  Min skill match: {CLAUDE_FILTER_CONFIG['min_skill_match_percent']}%")
+    print(f"  Role match: {CLAUDE_FILTER_CONFIG['min_target_role_percentage']}%")
     print("=" * 80)
     
     jobs = get_unanalyzed_jobs(args.limit if args.limit > 0 else None)
@@ -482,7 +545,7 @@ def main():
         else:
             rejected += 1
         
-        time.sleep(2)
+        time.sleep(4)
     
     print("\n" + "=" * 80)
     print(f"✅ COMPLETE - Tier 1: {tier1} | Tier 2: {tier2} | Rejected: {rejected}")

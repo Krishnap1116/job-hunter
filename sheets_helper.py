@@ -2,14 +2,14 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import os
-# from dotenv import load_dotenv
+from dotenv import load_dotenv
 from config import GOOGLE_SHEETS_CREDENTIALS, SPREADSHEET_ID
 # Load environment variables
-# load_dotenv('.env')
+load_dotenv('.env')
 
-# # Get credentials from environment
-# GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
-# SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+# Get credentials from environment
+GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
+SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 
 def get_sheets_client():
     """Connect to Google Sheets"""
