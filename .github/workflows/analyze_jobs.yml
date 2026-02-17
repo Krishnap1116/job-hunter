@@ -52,6 +52,14 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
+          echo "🔍 Checking environment variables..."
+          echo "GOOGLE_SHEET_ID: ${GOOGLE_SHEET_ID:0:10}..."
+          echo "ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:0:15}..."
+          
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "❌ ERROR: ANTHROPIC_API_KEY is empty!"
+            exit 1
+          fi
           if [ "${{ inputs.analyze_all }}" = "yes" ]; then
             echo "📋 Analyzing ALL jobs from today"
             python matcher.py --profile ${{ inputs.profile }} --limit 0
