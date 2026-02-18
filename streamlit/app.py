@@ -13,6 +13,37 @@ from resume_parser import parse_resume_with_claude
 from job_scraper_integrated import IntegratedScraper
 from job_matcher_integrated import IntegratedMatcher
 
+import streamlit as st
+import hmac
+
+def check_password():
+    """Returns `True` if the user had the correct password."""
+    
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        if hmac.compare_digest(st.session_state["password"], st.secrets["app_password"]):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Don't store password
+        else:
+            st.session_state["password_correct"] = False
+
+    # Return True if password is already validated
+    if st.session_state.get("password_correct", False):
+        return True
+
+    # Show input for password
+    st.text_input(
+        "Password", type="password", on_change=password_entered, key="password"
+    )
+    
+    if "password_correct" in st.session_state:
+        st.error("😕 Password incorrect")
+    
+    return False
+
+# Check password before showing app
+if not check_password():
+    st.stop() 
 # Page config
 st.set_page_config(
     page_title="AI Job Hunter",
