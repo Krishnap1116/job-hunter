@@ -695,6 +695,44 @@ else:
         with tab3:
             st.subheader("🔍 Collect Jobs")
             
+            # ✅ ADD THIS SECTION - Refresh API Keys
+            import os
+            
+            # Check if secrets have keys that database doesn't
+            env_jsearch = os.getenv("JSEARCH_API_KEY")
+            env_adzuna_id = os.getenv("ADZUNA_APP_ID")
+            env_adzuna_key = os.getenv("ADZUNA_API_KEY")
+            
+            current_keys = db.get_api_keys(profile_id)
+            
+            needs_refresh = (
+                (env_jsearch and not current_keys.get('jsearch_key')) or
+                (env_adzuna_id and not current_keys.get('adzuna_id')) or
+                (env_adzuna_key and not current_keys.get('adzuna_key'))
+            )
+            
+            if needs_refresh:
+                st.warning("⚠️ **New API keys detected in secrets!**")
+                st.info("Click below to update your profile with the keys from Streamlit Secrets")
+                
+                if st.button("🔄 Refresh API Keys from Secrets", type="primary"):
+                    # Get ALL keys from environment
+                    env_anthropic = os.getenv("ANTHROPIC_API_KEY")
+                    env_openrouter = os.getenv("OPENROUTER_API_KEY")
+                    
+                    # Update database
+                    db.update_api_keys(profile_id, {
+                        'anthropic_key': env_anthropic,
+                        'openrouter_key': env_openrouter,
+                        'jsearch_key': env_jsearch,
+                        'adzuna_id': env_adzuna_id,
+                        'adzuna_key': env_adzuna_key
+                    })
+                    
+                    st.success("✅ API keys updated from secrets! Reloading...")
+                    time.sleep(1)
+                    st.rerun()
+            
             st.info("💡 Collects fresh jobs from the last 24 hours from all available sources.")
             
             st.markdown("**Available Sources:**")
