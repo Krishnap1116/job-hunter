@@ -691,35 +691,40 @@ else:
                 st.rerun()
         
         # ===== TAB 4: SCHEDULE =====
+        # ===== TAB 3: COLLECT JOBS =====
         with tab3:
             st.subheader("🔍 Collect Jobs")
             
-            st.info("Manually collect jobs from job boards. Click the button below to scrape fresh jobs.")
+            st.info("💡 Collects fresh jobs from the last 24 hours from all available sources.")
             
+            st.markdown("**Available Sources:**")
             col1, col2 = st.columns(2)
             
             with col1:
-                limit_per_source = st.number_input(
-                    "Jobs per source",
-                    min_value=5,
-                    max_value=50,
-                    value=20,
-                    help="How many jobs to collect from each source"
-                )
+                st.write("✅ **Free Sources:**")
+                st.write("• RemoteOK")
+                st.write("• SimplifyJobs (GitHub)")
             
             with col2:
-                st.write("")
-                st.write("")
-                if st.button("🔍 Collect Jobs Now", type="primary", use_container_width=True):
-                    st.session_state.manual_collect = True
+                st.write("⚠️ **Requires API Keys:**")
+                jsearch_status = "✅" if api_keys.get('jsearch_key') else "❌"
+                adzuna_status = "✅" if api_keys.get('adzuna_id') and api_keys.get('adzuna_key') else "❌"
+                st.write(f"{jsearch_status} JSearch API")
+                st.write(f"{adzuna_status} Adzuna API")
+            
+            st.markdown("---")
+            
+            if st.button("🔍 Collect Jobs Now", type="primary", use_container_width=True):
+                st.session_state.manual_collect = True
             
             if st.session_state.get('manual_collect'):
-                with st.spinner("Collecting jobs..."):
-                    # Run scraper
+                with st.spinner("🔍 Collecting jobs from all sources..."):
                     scraper = IntegratedScraper(api_keys)
+                    
+                    # Collect ALL jobs (no limit)
                     jobs = scraper.scrape_all(
                         target_roles=profile['target_roles'],
-                        limit_per_source=limit_per_source
+                        limit_per_source=50  # Max from each source
                     )
                     
                     saved = 0
@@ -727,12 +732,15 @@ else:
                         if db.save_raw_job(profile_id, job):
                             saved += 1
                     
-                    st.success(f"✅ Collected {saved} new jobs!")
+                    st.success(f"✅ Collected {saved} new jobs from the last 24 hours!")
                     st.session_state.manual_collect = False
                     
-                    if st.button("🤖 Analyze These Jobs"):
-                        st.session_state.page = "🤖 Analyze Jobs"
-                        st.rerun()
+                    if saved > 0:
+                        if st.button("🤖 Analyze These Jobs"):
+                            st.session_state.page = "🤖 Analyze Jobs"
+                            st.rerun()
+                    else:
+                        st.info("No new jobs found. Try again later!")
         
         # ===== TAB 4: COLLECT JOBS =====
         with tab4:

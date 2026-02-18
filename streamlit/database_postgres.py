@@ -286,6 +286,9 @@ class JobHunterDB:
             # Auto-populate API keys from environment
             anthropic_key = os.getenv("ANTHROPIC_API_KEY")
             openrouter_key = os.getenv("OPENROUTER_API_KEY")
+            jsearch_key = os.getenv("JSEARCH_API_KEY")  # ← ADD
+            adzuna_id = os.getenv("ADZUNA_APP_ID")      # ← ADD
+            adzuna_key = os.getenv("ADZUNA_API_KEY")
             cursor.execute('''
             INSERT INTO api_keys (profile_id, anthropic_key, openrouter_key)
             VALUES (%s, %s, %s)
