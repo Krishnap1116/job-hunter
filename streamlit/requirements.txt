@@ -1,0 +1,9 @@
+streamlit
+anthropic
+requests
+beautifulsoup4
+lxml
+python-dotenv
+openai
+PyPDF2
+psycopg2-binary

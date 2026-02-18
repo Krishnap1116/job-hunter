@@ -3,3 +3,45 @@
 Krishna_ML.pdf
 Krishna_Priyanka_Ponnaganti_r.pdf
 __pycache__/
+# .gitignore
+
+# Database files (don't upload SQLite to GitHub)
+# Streamlit databases (don't upload)
+streamlit/*.db
+streamlit/job_hunter.db
+
+# Streamlit cache
+streamlit/.streamlit/
+
+# Python cache in streamlit folder
+streamlit/__pycache__/
+streamlit/*.pyc
+
+# Environment variables (don't upload secrets!)
+.env
+.streamlit/secrets.toml
+
+# Python
+streamlit/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+tmp/
+temp/

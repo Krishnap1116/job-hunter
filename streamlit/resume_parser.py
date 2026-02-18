@@ -7,22 +7,25 @@ import json
 from pathlib import Path
 
 # Try to load .env file if it exists
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+from dotenv import load_dotenv
+load_dotenv()
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-if not ANTHROPIC_API_KEY:
-    print("❌ ANTHROPIC_API_KEY not found!")
-    print("\nSet it with: export ANTHROPIC_API_KEY='sk-ant-...'")
-    exit(1)
+# if not ANTHROPIC_API_KEY:
+#     print("❌ ANTHROPIC_API_KEY not found!")
+#     print("\nSet it with: export ANTHROPIC_API_KEY='sk-ant-...'")
+#     exit(1)
 
 def parse_resume_with_claude(resume_path):
-    """Parse resume PDF and extract structured profile using Claude"""
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    """Parse resume PDF"""
+    # Don't get API key here - will be provided by caller
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    
+    if not api_key:
+        raise Exception("ANTHROPIC_API_KEY not found in environment")
+    
+    client = anthropic.Anthropic(api_key=api_key)
     
     print(f"📄 Reading resume: {resume_path}")
     
