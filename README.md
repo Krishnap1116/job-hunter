@@ -1,98 +1,110 @@
-# job-hunter
-Automated job search system
-# 🎯 AI Job Hunter - Self-Service Platform
+# AI Job Hunter 🎯
 
-A complete self-service job hunting platform powered by Claude AI.
+A full-stack AI-powered job matching system that scrapes jobs from 11+ sources daily, analyzes them against your resume using Claude Sonnet, and surfaces only the roles worth applying to — deployed on Streamlit Cloud with a PostgreSQL backend.
 
-## Features
+---
 
-- 📄 **Resume Parsing**: Upload your resume, AI extracts your profile
-- 🔍 **Job Collection**: Scrapes multiple job boards automatically
-- 🤖 **AI Matching**: Claude analyzes jobs and finds perfect matches
-- 🎯 **Tiered Results**: Tier 1 (best matches) and Tier 2 (good backups)
-- ⚙️ **Customizable**: Set your own filters and preferences
-- 💾 **Local Storage**: All data stored in SQLite (no external dependencies)
+## What It Does
 
-## Quick Start
+Most job boards show you hundreds of irrelevant listings. This system runs a two-stage AI pipeline to cut through the noise:
 
-### 1. Install Dependencies
+1. **Scrape** — Pulls jobs daily from 11+ sources including Greenhouse ATS, Lever ATS, JSearch API, Adzuna, and RSS feeds (We Work Remotely, Remotive), targeting companies like Anthropic, OpenAI, Scale, Notion, Stripe, and 40+ others
+2. **Pre-filter** — Regex-based rules eliminate obvious mismatches (wrong seniority, location, role type) before any AI call — reducing Claude API usage by ~70%
+3. **AI Match** — Claude Sonnet 4 analyzes remaining jobs against your parsed resume, scoring fit and flagging dealbreakers
+4. **Deliver** — Results surface in a Streamlit web app with match scores, reasoning, and direct apply links
+
+**Result:** Analysis time cut from 7s → 3s per job. 100+ jobs collected daily, filtered to the ones that matter.
+
+---
+
+## Architecture
+
+```
+Scrapers (11+ sources)
+    ↓
+Pre-filter (regex rules, USA-only, seniority gate)
+    ↓
+Claude Sonnet 4 AI Matching (Anthropic API)
+    ↓
+PostgreSQL (Render) — 7-day auto-cleanup
+    ↓
+Streamlit Cloud (password-protected UI)
+```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Streamlit, deployed on Streamlit Cloud |
+| AI Matching | Claude Sonnet 4 (Anthropic API) |
+| Resume Parsing | Claude API — extracts skills, experience, preferences |
+| Scraping | Greenhouse API, Lever API, JSearch API, Adzuna API, RSS (feedparser), BeautifulSoup |
+| Database | PostgreSQL (psycopg2), hosted on Render |
+| Auth | Streamlit secrets-based password auth (HMAC) |
+| Language | Python 3.11 |
+
+---
+
+## Key Features
+
+- **Multi-source scraping** — Greenhouse + Lever ATS direct APIs (no scraping fragility), JSearch, Adzuna, RSS feeds
+- **Smart pre-filtering** — Strict USA-only location logic, configurable experience caps, role-type matching before any AI call
+- **Resume-aware matching** — Upload your resume once; Claude parses it and all subsequent matches are personalized to your profile
+- **Multi-user isolation** — Email-based profile separation, each user sees only their own matches
+- **Auto-cleanup** — Jobs older than 7 days are automatically purged to manage storage costs
+- **Config-driven strictness** — Matching thresholds, experience limits, and skill weights are all configurable without touching core logic
+
+---
+
+## Project Structure
+
+```
+├── app.py                      # Streamlit UI, auth, session management
+├── job_scraper_integrated.py   # Unified scraper across all sources
+├── scraper.py                  # Source-specific scraping logic
+├── matcher.py                  # Claude AI matching pipeline
+├── database_postgres.py        # PostgreSQL schema, queries, migrations
+├── database.py                 # SQLite version (local dev)
+└── README.md
+```
+
+---
+
+## Setup
+
+### 1. Clone and install
 ```bash
+git clone https://github.com/Krishnap1116/job-hunter.git
+cd job-hunter
 pip install -r requirements.txt
 ```
 
-### 2. Run the App
+### 2. Set environment variables
+```
+ANTHROPIC_API_KEY=your_key
+DATABASE_URL=postgresql://...
+JSEARCH_API_KEY=your_key
+ADZUNA_APP_ID=your_id
+ADZUNA_API_KEY=your_key
+```
+
+### 3. Run locally
 ```bash
 streamlit run app.py
 ```
 
-### 3. Create Profile
+---
 
-1. Upload your resume (PDF)
-2. AI will extract your skills and experience
-3. Review and confirm your profile
-4. Add your Anthropic API key in Settings
+## Why I Built This
 
-### 4. Find Jobs
+Job searching at scale is a data pipeline problem. I was applying to 10–20 roles a day and spending too much time reading listings that were obviously wrong fits. I built this to automate the filtering layer — so I only spend time on roles that actually match my profile.
 
-1. Click "Collect Jobs" to scrape job boards
-2. Click "Analyze Jobs" to match with AI
-3. View your Tier 1 and Tier 2 matches!
+The interesting engineering problem was the two-stage matching architecture: using cheap regex rules to eliminate 70% of jobs before hitting the Claude API, while making sure the pre-filter wasn't too aggressive and discarding real matches. The config-driven strictness system lets me tune that tradeoff without redeploying.
 
-## API Keys Needed
+---
 
-### Required:
-- **Anthropic API Key**: Get from https://console.anthropic.com/
-
-### Optional (for more job sources):
-- **JSearch API**: Get from RapidAPI
-- **Adzuna API**: Get from Adzuna
-
-## Database
-
-All data is stored in `job_hunter.db` (SQLite).
-
-Tables:
-- `profiles` - User profiles
-- `filter_configs` - Filter settings
-- `raw_jobs` - Scraped jobs
-- `analyzed_jobs` - Matched jobs
-- `api_keys` - API keys (encrypted in production)
-
-## File Structure
-```
-job-hunter/
-├── app.py                      # Main Streamlit app
-├── database.py                 # Database manager
-├── resume_parser.py            # Resume parsing with Claude
-├── job_scraper_integrated.py   # Job scraper
-├── job_matcher_integrated.py   # Job matcher with Claude
-├── requirements.txt            # Python dependencies
-├── job_hunter.db              # SQLite database (created on first run)
-└── README.md                   # This file
-```
-
-## How It Works
-
-1. **Upload Resume** → Claude extracts skills, experience, target roles
-2. **Set Filters** → Configure max experience, skill thresholds, visa requirements
-3. **Collect Jobs** → Scrapes RemoteOK, SimplifyJobs, JSearch, Adzuna
-4. **Pre-Filter** → Quickly eliminates non-matches (seniority, experience)
-5. **AI Analysis** → Claude deeply analyzes each job against your profile
-6. **View Matches** → See Tier 1 (best) and Tier 2 (backup) matches
-
-## Tips
-
-- Start with 10-20 jobs when first testing
-- Add optional API keys for more job sources
-- Adjust filters if too many/few matches
-- Jobs are deduplicated automatically
-
-## Security Note
-
-⚠️ API keys are stored in plain text in the SQLite database.
-
-For production use, implement proper encryption!
-
-## Support
-
-Questions? Issues? Open a GitHub issue!
+## Live Demo
+https://job-searching.streamlit.app/
+> App is password-protected to manage API costs. Happy to do a live walkthrough during interview or provide demo credentials on request.
