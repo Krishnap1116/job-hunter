@@ -123,6 +123,7 @@ class JobHunterDB:
             role_match_pct INTEGER,
             skill_match_pct INTEGER,
             reasoning TEXT,
+            tailored_bullets TEXT DEFAULT '[]',
             analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
             FOREIGN KEY (job_id) REFERENCES raw_jobs(job_id)
@@ -167,6 +168,16 @@ class JobHunterDB:
                 ADD COLUMN custom_reject_employment TEXT DEFAULT '[]'
                 ''')
                 print("✅ Added custom_reject_employment column")
+
+            # Add tailored_bullets to analyzed_jobs if missing
+            cursor.execute("PRAGMA table_info(analyzed_jobs)")
+            aj_columns = [col[1] for col in cursor.fetchall()]
+            if 'tailored_bullets' not in aj_columns:
+                cursor.execute('''
+                ALTER TABLE analyzed_jobs
+                ADD COLUMN tailored_bullets TEXT DEFAULT '[]'
+                ''')
+                print("✅ Added tailored_bullets column")
             
             conn.commit()
         except Exception as e:
@@ -471,12 +482,13 @@ class JobHunterDB:
         if job:
             cursor.execute('''
             INSERT INTO analyzed_jobs (profile_id, job_id, company, title, url, tier, match_score,
-            experience_required, role_match_pct, skill_match_pct, reasoning)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            experience_required, role_match_pct, skill_match_pct, reasoning, tailored_bullets)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (profile_id, job_id, job[0], job[1], job[2], analysis.get('tier'),
                   analysis.get('match_score'), analysis.get('experience_required_min'),
                   analysis.get('role_match_percentage'), analysis.get('core_skills_match_percent'),
-                  analysis.get('final_reasoning')))
+                  analysis.get('final_reasoning'),
+                  json.dumps(analysis.get('tailored_bullets', []))))
             
             cursor.execute('UPDATE raw_jobs SET status = ? WHERE job_id = ?', ('analyzed', job_id))
             conn.commit()
@@ -505,7 +517,9 @@ class JobHunterDB:
             'id': job[0], 'job_id': job[2], 'company': job[3], 'title': job[4],
             'url': job[5], 'tier': job[6], 'match_score': job[7],
             'experience_required': job[8], 'role_match_pct': job[9],
-            'skill_match_pct': job[10], 'reasoning': job[11], 'analyzed_at': job[12]
+            'skill_match_pct': job[10], 'reasoning': job[11],
+            'tailored_bullets': json.loads(job[12]) if len(job) > 12 and job[12] else [],
+            'analyzed_at': job[13] if len(job) > 13 else job[12]
         } for job in jobs]
     
     def get_stats(self, profile_id):

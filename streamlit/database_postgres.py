@@ -150,6 +150,7 @@ class JobHunterDB:
             role_match_pct INTEGER,
             skill_match_pct INTEGER,
             reasoning TEXT,
+            tailored_bullets TEXT DEFAULT '[]',
             analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
@@ -208,6 +209,19 @@ class JobHunterDB:
                 ADD COLUMN custom_reject_employment TEXT DEFAULT '[]'
                 """)
                 print("✅ Added custom_reject_employment column")
+
+            # Add tailored_bullets to analyzed_jobs if missing
+            cursor.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'analyzed_jobs'
+            """)
+            aj_columns = [row[0] for row in cursor.fetchall()]
+            if 'tailored_bullets' not in aj_columns:
+                cursor.execute("""
+                ALTER TABLE analyzed_jobs
+                ADD COLUMN tailored_bullets TEXT DEFAULT '[]'
+                """)
+                print("✅ Added tailored_bullets column")
             
             conn.commit()
             
@@ -582,19 +596,20 @@ class JobHunterDB:
             cursor.execute('''
             INSERT INTO analyzed_jobs (
                 profile_id, job_id, company, title, url, tier, match_score,
-                experience_required, role_match_pct, skill_match_pct, reasoning
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                experience_required, role_match_pct, skill_match_pct, reasoning,
+                tailored_bullets
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (
                 profile_id, job_id, job[0], job[1], job[2],
                 analysis.get('tier'), analysis.get('match_score'),
                 analysis.get('experience_required_min'),
                 analysis.get('role_match_percentage'),
                 analysis.get('core_skills_match_percent'),
-                analysis.get('final_reasoning')
+                analysis.get('final_reasoning'),
+                json.dumps(analysis.get('tailored_bullets', []))
             ))
             
             cursor.execute('UPDATE raw_jobs SET status = %s WHERE job_id = %s', ('analyzed', job_id))
-            
             conn.commit()
         
         cursor.close()
@@ -619,11 +634,21 @@ class JobHunterDB:
             ''', (profile_id,))
         
         jobs = cursor.fetchall()
-        
         cursor.close()
         conn.close()
         
-        return [dict(job) for job in jobs]
+        result = []
+        for job in jobs:
+            job_dict = dict(job)
+            # Parse tailored_bullets from JSON string back to list
+            raw_bullets = job_dict.get('tailored_bullets', '[]')
+            if isinstance(raw_bullets, str):
+                try:
+                    job_dict['tailored_bullets'] = json.loads(raw_bullets)
+                except Exception:
+                    job_dict['tailored_bullets'] = []
+            result.append(job_dict)
+        return result
     
     def get_stats(self, profile_id):
         """Get statistics"""
