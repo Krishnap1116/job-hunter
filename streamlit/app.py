@@ -745,75 +745,7 @@ else:
     # ══════════════════════════════════════════
     if st.session_state.page == "home":
 
-        # ── Resume switcher ───────────────────────────────────
-        if len(all_resumes) > 0:
-            resume_labels = {r['id']: f"{'✅ ' if r['is_active'] else ''}{r['label']}" for r in all_resumes}
-            col_res, col_add = st.columns([4, 1])
-            with col_res:
-                selected_resume_id = st.selectbox(
-                    "Active Resume",
-                    options=[r['id'] for r in all_resumes],
-                    format_func=lambda rid: resume_labels[rid],
-                    index=next((i for i, r in enumerate(all_resumes) if r['is_active']), 0),
-                    key="resume_switcher",
-                    label_visibility="collapsed"
-                )
-            with col_add:
-                if st.button("＋ Resume", use_container_width=True):
-                    st.session_state.show_add_resume = True
-
-            if selected_resume_id != active_resume_id:
-                db.set_active_resume(profile_id, selected_resume_id)
-                st.session_state.auto_analyzed = False
-                st.session_state.auto_analyzing = False
-                st.rerun()
-
-            # Add resume wizard — auto-parse with Claude
-            if st.session_state.get('show_add_resume'):
-                with st.expander("➕ Add New Resume", expanded=True):
-                    if len(all_resumes) >= 3:
-                        st.warning("Maximum 3 resumes reached. Delete one before adding a new one.")
-                        if st.button("Cancel", key="cancel_add_res_max"):
-                            st.session_state.show_add_resume = False
-                            st.rerun()
-                    else:
-                        new_label = st.text_input("Label (e.g. 'ML Engineer', 'PM Resume')", key="new_res_label")
-                        uploaded_res = st.file_uploader("Upload Resume PDF", type=["pdf"], key="new_res_pdf")
-                        st.caption("Claude will auto-parse target roles and skills (~$0.01 cost)")
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            if st.button("Parse & Add Resume", type="primary", key="parse_add_btn"):
-                                if not new_label.strip():
-                                    st.error("Please enter a label.")
-                                elif not uploaded_res:
-                                    st.error("Please upload a PDF.")
-                                elif not api_keys.get('anthropic_key'):
-                                    st.error("Anthropic API key required to parse resume.")
-                                else:
-                                    with st.spinner("Parsing resume with Claude..."):
-                                        try:
-                                            from resume_parser import ResumeParser
-                                            parser = ResumeParser(api_key=api_keys['anthropic_key'])
-                                            pdf_bytes = uploaded_res.read()
-                                            parsed = parser.parse_resume(pdf_bytes)
-                                            roles_list  = parsed.get('target_roles', [])
-                                            skills_list = parsed.get('core_skills', [])
-                                            resume_text = parsed.get('resume_text', '')
-                                            db.create_resume(
-                                                profile_id, new_label.strip(),
-                                                roles_list, skills_list, resume_text,
-                                                make_active=True
-                                            )
-                                            st.session_state.show_add_resume = False
-                                            st.session_state.auto_analyzed = False
-                                            st.session_state.auto_analyzing = False
-                                            st.rerun()
-                                        except Exception as e:
-                                            st.error(f"Parse error: {e}")
-                        with c2:
-                            if st.button("Cancel", key="cancel_add_res"):
-                                st.session_state.show_add_resume = False
-                                st.rerun()
+        # resume switcher and add wizard rendered below stats row
 
         pending_jobs  = db.get_global_jobs_for_user(profile_id, hours=user_lookback, resume_id=active_resume_id)
         pending_count = len(pending_jobs)
@@ -879,6 +811,72 @@ else:
             {'&nbsp;·&nbsp; JSearch · Adzuna' if api_keys.get('jsearch_key') or api_keys.get('adzuna_id') else ''}
         </div>
         """, unsafe_allow_html=True)
+
+        # ── Resume switcher — sits below stats, clear of Streamlit toolbar ──
+        if len(all_resumes) > 0:
+            resume_labels = {r['id']: f"{'✅  ' if r['is_active'] else '○  '}{r['label']}" for r in all_resumes}
+            col_res, col_add = st.columns([5, 1])
+            with col_res:
+                selected_resume_id = st.selectbox(
+                    "📄 Active Resume",
+                    options=[r['id'] for r in all_resumes],
+                    format_func=lambda rid: resume_labels[rid],
+                    index=next((i for i, r in enumerate(all_resumes) if r['is_active']), 0),
+                    key="resume_switcher",
+                )
+            with col_add:
+                btn_disabled = len(all_resumes) >= 3
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("＋ Resume", use_container_width=True,
+                             disabled=btn_disabled,
+                             help="Maximum 3 resumes" if btn_disabled else "Add a new resume"):
+                    st.session_state.show_add_resume = True
+
+            if selected_resume_id != active_resume_id:
+                db.set_active_resume(profile_id, selected_resume_id)
+                st.session_state.auto_analyzed = False
+                st.session_state.auto_analyzing = False
+                st.rerun()
+
+            # Add resume wizard
+            if st.session_state.get('show_add_resume'):
+                with st.expander("➕ Add New Resume", expanded=True):
+                    new_label    = st.text_input("Label (e.g. 'ML Engineer', 'PM Resume')", key="new_res_label")
+                    uploaded_res = st.file_uploader("Upload Resume PDF", type=["pdf"], key="new_res_pdf")
+                    st.caption("Claude will auto-parse target roles and skills (~$0.01 cost)")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.button("Parse & Add", type="primary", key="parse_add_btn"):
+                            if not new_label.strip():
+                                st.error("Please enter a label.")
+                            elif not uploaded_res:
+                                st.error("Please upload a PDF.")
+                            elif not api_keys.get('anthropic_key'):
+                                st.error("Anthropic API key required.")
+                            else:
+                                with st.spinner("Parsing with Claude..."):
+                                    try:
+                                        from resume_parser import ResumeParser
+                                        parser    = ResumeParser(api_key=api_keys['anthropic_key'])
+                                        pdf_bytes = uploaded_res.read()
+                                        parsed    = parser.parse_resume(pdf_bytes)
+                                        db.create_resume(
+                                            profile_id, new_label.strip(),
+                                            parsed.get('target_roles', []),
+                                            parsed.get('core_skills', []),
+                                            parsed.get('resume_text', ''),
+                                            make_active=True
+                                        )
+                                        st.session_state.show_add_resume = False
+                                        st.session_state.auto_analyzed   = False
+                                        st.session_state.auto_analyzing  = False
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Parse error: {e}")
+                    with c2:
+                        if st.button("Cancel", key="cancel_add_res"):
+                            st.session_state.show_add_resume = False
+                            st.rerun()
 
         if not has_anthropic:
             st.warning("⚠️ Add your **Anthropic API key** in Settings to enable AI analysis.")
