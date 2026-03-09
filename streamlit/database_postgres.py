@@ -137,7 +137,8 @@ class JobHunterDB:
                 tailored_bullets TEXT DEFAULT '[]',
                 applied INTEGER DEFAULT 0,
                 applied_at TIMESTAMP,
-                analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(profile_id, job_id)
             )''',
             '''CREATE TABLE IF NOT EXISTS api_keys (
                 id SERIAL PRIMARY KEY,
@@ -242,6 +243,22 @@ class JobHunterDB:
             WHERE table_name = 'profiles'
             """)
             prof_columns = [row[0] for row in cursor.fetchall()]
+            # Add UNIQUE constraint to analyzed_jobs if missing
+            cursor.execute("""
+                SELECT constraint_name FROM information_schema.table_constraints
+                WHERE table_name = 'analyzed_jobs' AND constraint_type = 'UNIQUE'
+            """)
+            if not cursor.fetchone():
+                try:
+                    cursor.execute("""
+                        ALTER TABLE analyzed_jobs
+                        ADD CONSTRAINT analyzed_jobs_profile_job_unique
+                        UNIQUE (profile_id, job_id)
+                    """)
+                    print("Added UNIQUE constraint to analyzed_jobs")
+                except Exception:
+                    pass  # already exists under different name
+
             if 'job_lookback_hours' not in prof_columns:
                 cursor.execute("ALTER TABLE profiles ADD COLUMN job_lookback_hours INTEGER DEFAULT 24")
                 print("✅ Added job_lookback_hours column")
@@ -780,21 +797,37 @@ class JobHunterDB:
         conn.close()
     
     def save_analyzed_job(self, profile_id, job_id, analysis):
-        """Save analyzed job"""
+        """Save analyzed job — looks up details from global_raw_jobs (primary)
+        then falls back to legacy raw_jobs table."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        
-        # Get job details
-        cursor.execute('SELECT company, title, url FROM raw_jobs WHERE job_id = %s', (job_id,))
+
+        # Try global_raw_jobs first (current architecture)
+        cursor.execute('SELECT company, title, url FROM global_raw_jobs WHERE job_id = %s', (job_id,))
         job = cursor.fetchone()
-        
+
+        # Fall back to legacy raw_jobs
+        if not job:
+            cursor.execute('SELECT company, title, url FROM raw_jobs WHERE job_id = %s', (job_id,))
+            job = cursor.fetchone()
+
         if job:
+            # Use ON CONFLICT so re-runs don't create duplicates
             cursor.execute('''
             INSERT INTO analyzed_jobs (
                 profile_id, job_id, company, title, url, tier, match_score,
                 experience_required, role_match_pct, skill_match_pct, reasoning,
                 tailored_bullets
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (profile_id, job_id) DO UPDATE SET
+                tier             = EXCLUDED.tier,
+                match_score      = EXCLUDED.match_score,
+                experience_required = EXCLUDED.experience_required,
+                role_match_pct   = EXCLUDED.role_match_pct,
+                skill_match_pct  = EXCLUDED.skill_match_pct,
+                reasoning        = EXCLUDED.reasoning,
+                tailored_bullets = EXCLUDED.tailored_bullets,
+                analyzed_at      = CURRENT_TIMESTAMP
             ''', (
                 profile_id, job_id, job[0], job[1], job[2],
                 analysis.get('tier'), analysis.get('match_score'),
@@ -804,10 +837,10 @@ class JobHunterDB:
                 analysis.get('final_reasoning'),
                 json.dumps(analysis.get('tailored_bullets', []))
             ))
-            
-            cursor.execute('UPDATE raw_jobs SET status = %s WHERE job_id = %s', ('analyzed', job_id))
             conn.commit()
-        
+        else:
+            print(f"Warning: job_id {job_id} not found in global_raw_jobs or raw_jobs — skipping save")
+
         cursor.close()
         conn.close()
     

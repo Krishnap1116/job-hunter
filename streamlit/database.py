@@ -695,25 +695,33 @@ class JobHunterDB:
         conn.close()
     
     def save_analyzed_job(self, profile_id, job_id, analysis):
-        """Save analyzed job"""
+        """Save analyzed job — checks global_raw_jobs first, falls back to raw_jobs."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT company, title, url FROM raw_jobs WHERE job_id = ?', (job_id,))
+
+        # Try global_raw_jobs first (current architecture)
+        cursor.execute('SELECT company, title, url FROM global_raw_jobs WHERE job_id = ?', (job_id,))
         job = cursor.fetchone()
-        
+
+        # Fall back to legacy raw_jobs
+        if not job:
+            cursor.execute('SELECT company, title, url FROM raw_jobs WHERE job_id = ?', (job_id,))
+            job = cursor.fetchone()
+
         if job:
             cursor.execute('''
-            INSERT INTO analyzed_jobs (profile_id, job_id, company, title, url, tier, match_score,
-            experience_required, role_match_pct, skill_match_pct, reasoning, tailored_bullets)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO analyzed_jobs (
+                profile_id, job_id, company, title, url, tier, match_score,
+                experience_required, role_match_pct, skill_match_pct, reasoning, tailored_bullets
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (profile_id, job_id, job[0], job[1], job[2], analysis.get('tier'),
                   analysis.get('match_score'), analysis.get('experience_required_min'),
                   analysis.get('role_match_percentage'), analysis.get('core_skills_match_percent'),
                   analysis.get('final_reasoning'),
                   json.dumps(analysis.get('tailored_bullets', []))))
-            
-            cursor.execute('UPDATE raw_jobs SET status = ? WHERE job_id = ?', ('analyzed', job_id))
             conn.commit()
+        else:
+            print(f"Warning: job_id {job_id} not found in global_raw_jobs or raw_jobs — skipping save")
         conn.close()
     
     def mark_job_applied(self, job_id):
