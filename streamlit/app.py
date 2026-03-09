@@ -456,13 +456,33 @@ DEFAULTS = {
     'last_collect_saved': 0,
     'analyzing': False,
     'show_setup_wizard': False,
-    'auto_analyzed': False,       # True once auto-analysis has run this session
-    'auto_analyzing': False,      # True while auto-analysis is in progress
-    'manual_refresh': False,      # User clicked "Refresh Now" on matches page
+    'auto_analyzed': False,
+    'auto_analyzing': False,
+    'manual_refresh': False,
+    'manual_collect_done_pending': False,
+    'manual_collect_new_count': 0,
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+# ─────────────────────────────────────────────
+# Persist login across browser refreshes
+# st.query_params survives refresh; session_state does not.
+# On refresh: query_params still has pid=X → restore session.
+# On sign-out: query_params is cleared.
+# ─────────────────────────────────────────────
+if st.session_state.profile_id is None:
+    try:
+        pid_str = st.query_params.get('pid')
+        if pid_str:
+            pid = int(pid_str)
+            # Verify the profile actually exists in DB
+            check = db.get_profile_by_id(pid)
+            if check:
+                st.session_state.profile_id = pid
+    except Exception:
+        pass  # Bad param — ignore, stay logged out
 
 # ─────────────────────────────────────────────
 # Sidebar
@@ -545,6 +565,7 @@ with st.sidebar:
 
         st.markdown("---")
         if st.button("Sign Out", use_container_width=True):
+            st.query_params.clear()
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
@@ -656,6 +677,7 @@ if st.session_state.profile_id is None:
                             st.session_state.page = "home"
                             st.session_state.pop('temp_profile', None)
                             st.session_state.pop('reg_anthropic_key', None)
+                            st.query_params['pid'] = str(pid)
                             st.rerun()
                         else:
                             st.error("Email already registered. Sign in instead.")
@@ -670,6 +692,7 @@ if st.session_state.profile_id is None:
                 if found:
                     st.session_state.profile_id = found['id']
                     st.session_state.page = "home"
+                    st.query_params['pid'] = str(found['id'])
                     st.rerun()
                 else:
                     st.error("No account found. Create one first.")
