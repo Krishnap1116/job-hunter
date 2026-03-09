@@ -8,3 +8,4 @@ openai
 PyPDF2
 psycopg2-binary
 feedparser
+python-dateutil 
