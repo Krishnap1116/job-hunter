@@ -738,7 +738,8 @@ else:
     # ══════════════════════════════════════════
     if st.session_state.page == "home":
 
-        pending_jobs  = db.get_global_jobs_for_user(profile_id, hours=48)
+        user_lookback = db.get_job_lookback_hours(profile_id)
+        pending_jobs  = db.get_global_jobs_for_user(profile_id, hours=user_lookback)
         pending_count = len(pending_jobs)
         pool_stats    = db.get_global_pool_stats()
         has_anthropic = bool(api_keys.get('anthropic_key'))
@@ -901,8 +902,8 @@ else:
             st.rerun()
 
         if st.session_state.get('auto_analyzing'):
-            fresh_pending = db.get_global_jobs_for_user(profile_id, hours=48)
-            batch = fresh_pending[:50]
+            fresh_pending = db.get_global_jobs_for_user(profile_id, hours=user_lookback)
+            batch = fresh_pending[:30]  # cap at 30 — ~$0.06 per run
 
             st.markdown(f"### 🤖 Analyzing {len(batch)} new jobs for you...")
             st.caption("Pre-filtering first (instant, no cost), then Claude checks each match.")
@@ -956,7 +957,7 @@ else:
                         st.session_state.manual_collect  = False
                         st.session_state.collect_done    = True
                         st.session_state.auto_analyzed   = False  # allow re-analyze after fresh collect
-                        pending_jobs  = db.get_global_jobs_for_user(profile_id, hours=48)
+                        pending_jobs  = db.get_global_jobs_for_user(profile_id, hours=user_lookback)
                         pending_count = len(pending_jobs)
                         st.rerun()
 
@@ -975,7 +976,7 @@ else:
             # After manual collect: show confirm-to-analyze button
             if st.session_state.get('manual_collect_done_pending'):
                 new_ct = st.session_state.get('manual_collect_new_count', 0)
-                fresh_pending_ct = len(db.get_global_jobs_for_user(profile_id, hours=48))
+                fresh_pending_ct = len(db.get_global_jobs_for_user(profile_id, hours=user_lookback))
                 st.markdown(f"**{new_ct} new jobs collected.** {fresh_pending_ct} unanalyzed jobs ready.")
                 c1, c2, c3 = st.columns([1, 2, 2])
                 with c1:
@@ -991,7 +992,7 @@ else:
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.button("🤖  Analyze Now", type="primary", use_container_width=True, key="post_collect_analyze"):
                         st.session_state.manual_collect_done_pending = False
-                        batch = db.get_global_jobs_for_user(profile_id, hours=48)[:alimit]
+                        batch = db.get_global_jobs_for_user(profile_id, hours=user_lookback)[:alimit]
                         st.markdown("**Running AI analysis...**")
                         t1, t2, rej, reasons = run_analysis(batch)
                         db.set_last_analyzed(profile_id)
@@ -1047,7 +1048,7 @@ else:
                         st.session_state.analyzing = True
 
                 if st.session_state.get('analyzing'):
-                    jobs_to_run = db.get_global_jobs_for_user(profile_id, hours=48)[:analyze_limit]
+                    jobs_to_run = db.get_global_jobs_for_user(profile_id, hours=user_lookback)[:analyze_limit]
                     st.markdown("**Running AI analysis...**")
                     t1, t2, rej, reasons = run_analysis(jobs_to_run)
                     st.session_state.analyzing     = False
@@ -1078,7 +1079,7 @@ else:
         total   = len(t1_jobs) + len(t2_jobs)
 
         # Check if new unanalyzed jobs are available
-        new_pending = db.get_global_jobs_for_user(profile_id, hours=48)
+        new_pending = db.get_global_jobs_for_user(profile_id, hours=user_lookback)
         new_count   = len(new_pending)
 
         # Header row
@@ -1441,10 +1442,12 @@ else:
         # ── SCHEDULE ─────────────────────────
         with tab_schedule:
             sched = db.get_profile_by_id(profile_id)
-            cur_time = sched.get('collection_time', '09:00') or '09:00'
+            cur_time    = sched.get('collection_time', '09:00') or '09:00'
+            cur_lookback = db.get_job_lookback_hours(profile_id)
 
-            st.caption("Control when GitHub Actions collects fresh jobs each day.")
+            st.caption("Control when GitHub Actions collects fresh jobs and how far back to look.")
 
+            # ── Collection time ───────────────────────────────
             st.markdown('<div class="sec-hdr">Daily Collection Time (UTC)</div>', unsafe_allow_html=True)
             st.caption("GitHub Actions runs on UTC. e.g. 9 AM PST = 17:00 UTC, 9 AM EST = 14:00 UTC.")
 
@@ -1471,63 +1474,117 @@ else:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.caption(f"Currently saved: **{cur_time} UTC**")
 
-            hour = int(selected_time.split(":")[0])
+            # ── Job lookback window ───────────────────────────
+            st.markdown("---")
+            st.markdown('<div class="sec-hdr">Job Lookback Window</div>', unsafe_allow_html=True)
+            st.caption("How far back to look for new jobs each time you open the app. Shorter = fewer, fresher jobs. Longer = more jobs but more Claude cost.")
 
+            lookback_options = {
+                6:  "6 hours   — ultra-fresh, fewest jobs",
+                12: "12 hours  — good for twice-daily check-ins",
+                24: "24 hours  — recommended (matches daily collection)",
+                48: "48 hours  — catch up after skipping a day",
+                72: "72 hours  — catch up after a weekend",
+            }
+
+            col_c, col_d = st.columns(2)
+            with col_c:
+                selected_lookback = st.selectbox(
+                    "Lookback window",
+                    options=list(lookback_options.keys()),
+                    index=list(lookback_options.keys()).index(cur_lookback) if cur_lookback in lookback_options else 2,
+                    format_func=lambda h: lookback_options[h],
+                )
+            with col_d:
+                st.markdown("<br>", unsafe_allow_html=True)
+                est_cost = selected_lookback * 0.003  # rough estimate
+                st.caption(f"Currently saved: **{cur_lookback}h** · Est. ~${est_cost:.2f} per analysis run")
+
+            # ── Workflow snippet ──────────────────────────────
+            hour = int(selected_time.split(":")[0])
             st.markdown("---")
             st.markdown('<div class="sec-hdr">Update Your Workflow File</div>', unsafe_allow_html=True)
             st.caption("After saving, copy this into `.github/workflows/collect_jobs.yml` and commit:")
-
             yml_snippet = "on:\n  schedule:\n    - cron: '0 " + str(hour) + " * * *'   # " + selected_time + " UTC daily\n  workflow_dispatch:  # keep this to run manually"
             st.code(yml_snippet, language="yaml")
-
             st.caption("Commit the file — GitHub picks it up automatically with no redeploy needed.")
 
             if st.button("Save Schedule", type="primary"):
                 db.update_schedule_settings(profile_id, selected_time, True)
-                st.success(f"Schedule saved — jobs will collect at {selected_time} UTC daily. Update your workflow file too.")
+                db.set_job_lookback_hours(profile_id, selected_lookback)
+                st.success(f"✅ Saved — collecting at {selected_time} UTC, looking back {selected_lookback}h for new jobs.")
 
         # ── PROFILE ───────────────────────────
         with tab_profile:
+            # ── Account info (read-only) ──────────────────────
             st.markdown(f"""
             <div class="info-panel">
                 <div class="sec-hdr">Account</div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-size:0.875rem;">
                     <div>
-                        <div style="color:#475569;font-size:0.7rem;text-transform:uppercase;
-                                    letter-spacing:0.06em;margin-bottom:3px;">Name</div>
+                        <div style="color:#475569;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Name</div>
                         <div style="color:#e2e8f0;">{profile['name']}</div>
                     </div>
                     <div>
-                        <div style="color:#475569;font-size:0.7rem;text-transform:uppercase;
-                                    letter-spacing:0.06em;margin-bottom:3px;">Email</div>
+                        <div style="color:#475569;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Email</div>
                         <div style="color:#e2e8f0;">{profile['email']}</div>
                     </div>
                     <div>
-                        <div style="color:#475569;font-size:0.7rem;text-transform:uppercase;
-                                    letter-spacing:0.06em;margin-bottom:3px;">Experience</div>
+                        <div style="color:#475569;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Experience</div>
                         <div style="color:#e2e8f0;">{profile.get('experience_years','?')} years · {profile.get('experience_level','?').title()}</div>
                     </div>
                     <div>
-                        <div style="color:#475569;font-size:0.7rem;text-transform:uppercase;
-                                    letter-spacing:0.06em;margin-bottom:3px;">Skills extracted</div>
+                        <div style="color:#475569;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Skills extracted</div>
                         <div style="color:#e2e8f0;">{len(profile.get('core_skills',[]))}</div>
                     </div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-            with st.expander("Target Roles"):
-                for r in profile.get('target_roles', []):
-                    st.markdown(f'<span class="pill blue" style="margin:3px;display:inline-flex;">{r}</span>',
-                                unsafe_allow_html=True)
+            st.markdown("---")
 
-            with st.expander(f"Core Skills ({len(profile.get('core_skills',[]))} total)"):
-                chips = "".join(
-                    f'<span class="pill purple" style="margin:3px;display:inline-flex;">{s}</span>'
-                    for s in profile.get('core_skills', [])[:40]
-                )
-                st.markdown(f'<div style="line-height:2;">{chips}</div>', unsafe_allow_html=True)
-                if len(profile.get('core_skills',[])) > 40:
-                    st.caption(f"...and {len(profile.get('core_skills',[]))-40} more")
+            # ── Editable: Target Roles ─────────────────────────
+            st.markdown('<div class="sec-hdr">Target Roles</div>', unsafe_allow_html=True)
+            st.caption("These are what Claude extracted from your resume. Edit them to match what you're actually looking for. One role per line.")
 
-            st.caption("To update your profile, create a new account with your updated resume.")
+            current_roles = profile.get('target_roles', [])
+            roles_text = st.text_area(
+                "Target roles (one per line)",
+                value="\n".join(current_roles),
+                height=140,
+                label_visibility="collapsed",
+                help="Examples: machine learning engineer, software engineer, data scientist"
+            )
+
+            # ── Editable: Core Skills ──────────────────────────
+            st.markdown('<div class="sec-hdr" style="margin-top:16px;">Core Skills</div>', unsafe_allow_html=True)
+            st.caption("Edit your skills list. Comma-separated. Claude uses this to score skill match %.")
+
+            current_skills = profile.get('core_skills', [])
+            skills_text = st.text_area(
+                "Core skills (comma-separated)",
+                value=", ".join(current_skills),
+                height=120,
+                label_visibility="collapsed",
+                help="Examples: Python, PyTorch, LLMs, SQL, React, Kubernetes"
+            )
+
+            if st.button("💾  Save Profile Changes", type="primary"):
+                new_roles  = [r.strip() for r in roles_text.split("\n") if r.strip()]
+                new_skills = [s.strip() for s in skills_text.split(",")  if s.strip()]
+
+                if not new_roles:
+                    st.error("Please enter at least one target role.")
+                else:
+                    db.update_profile_roles_skills(profile_id, new_roles, new_skills)
+                    # Reset last_analyzed_at so new roles trigger a fresh analysis run
+                    # (old results were scored against old roles)
+                    conn = db.get_connection()
+                    cur  = conn.cursor()
+                    ph   = '%s' if hasattr(db, 'db_config') else '?'
+                    cur.execute(f'UPDATE profiles SET last_analyzed_at = NULL WHERE id = {ph}', (profile_id,))
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    st.success(f"✅ Saved — {len(new_roles)} roles, {len(new_skills)} skills. Next analysis will use your updated profile.")
+                    st.rerun()

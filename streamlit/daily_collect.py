@@ -23,16 +23,12 @@ from datetime import datetime
 # These are generic enough to catch jobs for most users.
 # Each user's Claude analysis then filters to their specific profile.
 DEFAULT_TARGET_ROLES = [
-    "machine learning engineer",
-    "data scientist",
-    "software engineer",
-    "AI engineer",
-    "NLP engineer",
-    "research engineer",
-    "data engineer",
-    "backend engineer",
-    "MLOps engineer",
-    "computer vision engineer",
+    "AI Engineer",
+    "ML Engineer",
+    "LLM Engineer",
+    "Applied AI Engineer",
+    "MLOps Engineer",
+    "Forward Deployed Engineer",
 ]
 
 def main():

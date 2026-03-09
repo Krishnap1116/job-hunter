@@ -35,6 +35,7 @@ class JobHunterDB:
             timezone TEXT DEFAULT 'America/New_York',
             auto_collect_enabled BOOLEAN DEFAULT 1,
             last_collection_run TIMESTAMP,
+                job_lookback_hours INTEGER DEFAULT 24,
             
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -223,6 +224,10 @@ class JobHunterDB:
             # Add last_analyzed_at to profiles if missing
             cursor.execute("PRAGMA table_info(profiles)")
             prof_columns = [col[1] for col in cursor.fetchall()]
+            if 'job_lookback_hours' not in prof_columns:
+                cursor.execute("ALTER TABLE profiles ADD COLUMN job_lookback_hours INTEGER DEFAULT 24")
+                print("Added job_lookback_hours column")
+
             if 'last_analyzed_at' not in prof_columns:
                 cursor.execute('''
                 ALTER TABLE profiles
@@ -278,6 +283,45 @@ class JobHunterDB:
         finally:
             conn.close()
     
+
+
+    def update_profile_roles_skills(self, profile_id, target_roles, core_skills):
+        """Let users edit their target roles and skills from the Settings UI."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE profiles SET target_roles = ?, core_skills = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (json.dumps(target_roles), json.dumps(core_skills), profile_id)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+    def get_all_target_roles(self):
+        """Return the union of target_roles across all user profiles.
+        Used by daily_collect.py so the shared pool covers every user's needs.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT target_roles FROM profiles WHERE target_roles IS NOT NULL')
+        rows = cursor.fetchall()
+        conn.close()
+
+        import json
+        seen = set()
+        roles = []
+        for row in rows:
+            try:
+                user_roles = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or [])
+                for r in user_roles:
+                    r_clean = r.strip().lower()
+                    if r_clean and r_clean not in seen:
+                        seen.add(r_clean)
+                        roles.append(r.strip())
+            except Exception:
+                pass
+        return roles
+
     def get_profile_by_id(self, profile_id):
         """Get profile by ID"""
         conn = self.get_connection()
@@ -486,6 +530,31 @@ class JobHunterDB:
         conn.close()
         return row[0] if row else None
 
+
+    def get_job_lookback_hours(self, profile_id):
+        """Return how many hours back to look for new jobs for this user."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT job_lookback_hours FROM profiles WHERE id = ?', (profile_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if row and row[0]:
+            return int(row[0])
+        return 24  # default
+
+    def set_job_lookback_hours(self, profile_id, hours):
+        """Save the user's preferred lookback window."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE profiles SET job_lookback_hours = ? WHERE id = ?',
+            (hours, profile_id)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+
     def update_schedule_settings(self, profile_id, collection_time, auto_collect_enabled):
         """Update schedule"""
         conn = self.get_connection()
@@ -522,7 +591,7 @@ class JobHunterDB:
         finally:
             conn.close()
 
-    def get_global_jobs_for_user(self, profile_id, hours=48):
+    def get_global_jobs_for_user(self, profile_id, hours=24):
         """Get global jobs not yet analyzed or rejected by this user."""
         conn = self.get_connection()
         cursor = conn.cursor()
