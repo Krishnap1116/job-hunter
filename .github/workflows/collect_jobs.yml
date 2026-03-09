@@ -1,37 +1,37 @@
-name: Collect Jobs
+# name: Collect Jobs
 
-on:
-  schedule:
-    - cron: '0 17 * * *'   # Every 6 hours
-  workflow_dispatch:
+# on:
+#   schedule:
+#     - cron: '0 17 * * *'   # Every 6 hours
+#   workflow_dispatch:
 
-jobs:
-  scrape:
-    runs-on: ubuntu-latest
+# jobs:
+#   scrape:
+#     runs-on: ubuntu-latest
     
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
+#     steps:
+#       - name: Checkout code
+#         uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 1
       
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.11'
+#           cache: 'pip'
       
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
+#       - name: Install dependencies
+#         run: |
+#           pip install --upgrade pip
+#           pip install -r requirements.txt
       
-      - name: Run job scraper
-        env:
-          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
-          GOOGLE_SHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          JSEARCH_API_KEY: ${{ secrets.JSEARCH_API_KEY }}
-          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
-          ADZUNA_API_KEY: ${{ secrets.ADZUNA_API_KEY }}
-        run: |
-          python scraper.py
+#       - name: Run job scraper
+#         env:
+#           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+#           GOOGLE_SHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+#           JSEARCH_API_KEY: ${{ secrets.JSEARCH_API_KEY }}
+#           ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+#           ADZUNA_API_KEY: ${{ secrets.ADZUNA_API_KEY }}
+#         run: |
+#           python scraper.py
