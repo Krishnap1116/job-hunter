@@ -243,6 +243,28 @@ class JobHunterDB:
             WHERE table_name = 'profiles'
             """)
             prof_columns = [row[0] for row in cursor.fetchall()]
+            # Drop FK constraint on analyzed_jobs(job_id) → raw_jobs if it exists
+            # Jobs now come from global_raw_jobs, so this FK breaks inserts
+            cursor.execute("""
+                SELECT constraint_name FROM information_schema.table_constraints
+                WHERE table_name = 'analyzed_jobs'
+                AND constraint_type = 'FOREIGN KEY'
+            """)
+            fk_constraints = [r[0] for r in cursor.fetchall()]
+            for fk in fk_constraints:
+                # Only drop the job_id FK, not the profile_id one
+                try:
+                    cursor.execute(f"""
+                        SELECT column_name FROM information_schema.key_column_usage
+                        WHERE constraint_name = '{fk}' AND table_name = 'analyzed_jobs'
+                    """)
+                    cols = [r[0] for r in cursor.fetchall()]
+                    if cols == ['job_id']:
+                        cursor.execute(f'ALTER TABLE analyzed_jobs DROP CONSTRAINT {fk}')
+                        print(f"Dropped FK constraint {fk} from analyzed_jobs")
+                except Exception as e:
+                    print(f"FK drop warning: {e}")
+
             # Add UNIQUE constraint to analyzed_jobs if missing
             cursor.execute("""
                 SELECT constraint_name FROM information_schema.table_constraints
