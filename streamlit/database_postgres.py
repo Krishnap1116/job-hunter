@@ -99,6 +99,16 @@ class JobHunterDB:
                 custom_accept_employment TEXT DEFAULT '[]',
                 custom_reject_employment TEXT DEFAULT '[]'
             )''',
+            '''CREATE TABLE IF NOT EXISTS resumes (
+                id         SERIAL PRIMARY KEY,
+                profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+                label      TEXT NOT NULL DEFAULT 'Resume',
+                target_roles TEXT DEFAULT '[]',
+                core_skills  TEXT DEFAULT '[]',
+                resume_text  TEXT DEFAULT '',
+                is_active  BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''',
             '''CREATE TABLE IF NOT EXISTS global_raw_jobs (
                 id         SERIAL PRIMARY KEY,
                 job_id     TEXT UNIQUE,
@@ -113,9 +123,10 @@ class JobHunterDB:
             '''CREATE TABLE IF NOT EXISTS user_job_status (
                 id         SERIAL PRIMARY KEY,
                 profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+                resume_id  INTEGER REFERENCES resumes(id) ON DELETE CASCADE,
                 job_id     TEXT,
                 status     TEXT DEFAULT 'pending',
-                UNIQUE(profile_id, job_id)
+                UNIQUE(profile_id, resume_id, job_id)
             )''',
             '''CREATE TABLE IF NOT EXISTS raw_jobs (
                 id SERIAL PRIMARY KEY,
@@ -129,6 +140,7 @@ class JobHunterDB:
             '''CREATE TABLE IF NOT EXISTS analyzed_jobs (
                 id SERIAL PRIMARY KEY,
                 profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+                resume_id  INTEGER REFERENCES resumes(id) ON DELETE CASCADE,
                 job_id TEXT, company TEXT, title TEXT, url TEXT,
                 tier INTEGER, match_score INTEGER,
                 experience_required INTEGER,
@@ -138,7 +150,7 @@ class JobHunterDB:
                 applied INTEGER DEFAULT 0,
                 applied_at TIMESTAMP,
                 analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(profile_id, job_id)
+                UNIQUE(profile_id, resume_id, job_id)
             )''',
             '''CREATE TABLE IF NOT EXISTS api_keys (
                 id SERIAL PRIMARY KEY,
@@ -146,6 +158,17 @@ class JobHunterDB:
                 anthropic_key TEXT, openrouter_key TEXT,
                 jsearch_key TEXT, adzuna_id TEXT, adzuna_key TEXT
             )''',
+            '''CREATE TABLE IF NOT EXISTS resumes (
+                id          SERIAL PRIMARY KEY,
+                profile_id  INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+                label       TEXT NOT NULL DEFAULT 'Resume 1',
+                target_roles TEXT DEFAULT '[]',
+                core_skills  TEXT DEFAULT '[]',
+                resume_text  TEXT DEFAULT '',
+                is_active   BOOLEAN DEFAULT FALSE,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''','''CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_resume
+                ON resumes(profile_id) WHERE is_active = TRUE''','''CREATE INDEX IF NOT EXISTS idx_resumes_profile ON resumes(profile_id)''','''CREATE INDEX IF NOT EXISTS idx_analyzed_resume ON analyzed_jobs(profile_id, resume_id)''','''CREATE INDEX IF NOT EXISTS idx_user_job_resume ON user_job_status(profile_id, resume_id)''',
         ]
 
         # Index statements — run separately, each in its own transaction
@@ -285,6 +308,17 @@ class JobHunterDB:
                 cursor.execute("ALTER TABLE profiles ADD COLUMN job_lookback_hours INTEGER DEFAULT 24")
                 print("✅ Added job_lookback_hours column")
 
+            # resume_id columns for per-resume history
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='analyzed_jobs'")
+            if 'resume_id' not in [r[0] for r in cursor.fetchall()]:
+                cursor.execute("ALTER TABLE analyzed_jobs ADD COLUMN resume_id INTEGER REFERENCES resumes(id) ON DELETE CASCADE")
+                print("✅ Added resume_id to analyzed_jobs")
+
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='user_job_status'")
+            if 'resume_id' not in [r[0] for r in cursor.fetchall()]:
+                cursor.execute("ALTER TABLE user_job_status ADD COLUMN resume_id INTEGER REFERENCES resumes(id) ON DELETE CASCADE")
+                print("✅ Added resume_id to user_job_status")
+
             conn.commit()
             
         except Exception as e:
@@ -407,17 +441,141 @@ class JobHunterDB:
         cursor.close()
         conn.close()
 
+
+    # ══════════════════════════════════════════════════════════════
+    # RESUME MANAGEMENT
+    # ══════════════════════════════════════════════════════════════
+
+    def get_resumes(self, profile_id):
+        """Return all resumes for a profile, active first."""
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            "SELECT * FROM resumes WHERE profile_id = %s ORDER BY is_active DESC, id ASC",
+            (profile_id,)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d['target_roles'] = json.loads(d['target_roles']) if isinstance(d.get('target_roles'), str) else (d.get('target_roles') or [])
+            d['core_skills']  = json.loads(d['core_skills'])  if isinstance(d.get('core_skills'),  str) else (d.get('core_skills')  or [])
+            result.append(d)
+        return result
+
+    def get_active_resume(self, profile_id):
+        """Return the active resume dict, or None."""
+        resumes = self.get_resumes(profile_id)
+        for r in resumes:
+            if r.get('is_active'):
+                return r
+        return resumes[0] if resumes else None
+
+    def create_resume(self, profile_id, label, target_roles, core_skills, resume_text="", make_active=False):
+        """Add a new resume. If make_active, deactivates all others first."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            if make_active:
+                cursor.execute("UPDATE resumes SET is_active = FALSE WHERE profile_id = %s", (profile_id,))
+            cursor.execute(
+                """INSERT INTO resumes (profile_id, label, target_roles, core_skills, resume_text, is_active)
+                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                (profile_id, label, json.dumps(target_roles), json.dumps(core_skills), resume_text, make_active)
+            )
+            resume_id = cursor.fetchone()[0]
+            conn.commit()
+            return resume_id
+        except Exception as e:
+            conn.rollback()
+            print(f"create_resume error: {e}")
+            return None
+        finally:
+            cursor.close()
+            conn.close()
+
+    def set_active_resume(self, profile_id, resume_id):
+        """Switch active resume. Resets last_analyzed_at so fresh analysis fires."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE resumes SET is_active = FALSE WHERE profile_id = %s", (profile_id,))
+        cursor.execute("UPDATE resumes SET is_active = TRUE  WHERE id = %s AND profile_id = %s", (resume_id, profile_id))
+        cursor.execute("UPDATE profiles SET last_analyzed_at = NULL WHERE id = %s", (profile_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+    def update_resume(self, resume_id, label, target_roles, core_skills):
+        """Edit a resume's label, roles, and skills."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE resumes SET label = %s, target_roles = %s, core_skills = %s WHERE id = %s",
+            (label, json.dumps(target_roles), json.dumps(core_skills), resume_id)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+    def delete_resume(self, profile_id, resume_id):
+        """Delete a resume and its analysis history. Cannot delete the only resume."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM resumes WHERE profile_id = %s", (profile_id,))
+        count = cursor.fetchone()[0]
+        if count <= 1:
+            cursor.close()
+            conn.close()
+            return False  # refuse to delete last resume
+        cursor.execute("DELETE FROM resumes WHERE id = %s AND profile_id = %s", (resume_id, profile_id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+
+    def ensure_default_resume(self, profile_id):
+        """Called on login — if profile has no resumes yet, migrate profile
+        roles/skills into a default 'Resume 1'. Safe to call every login."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM resumes WHERE profile_id = %s", (profile_id,))
+        if cursor.fetchone()[0] == 0:
+            # Migrate from profiles table
+            cursor.execute("SELECT target_roles, core_skills FROM profiles WHERE id = %s", (profile_id,))
+            row = cursor.fetchone()
+            roles  = json.loads(row[0]) if row and row[0] else []
+            skills = json.loads(row[1]) if row and row[1] else []
+            cursor.execute(
+                """INSERT INTO resumes (profile_id, label, target_roles, core_skills, is_active)
+                   VALUES (%s, %s, %s, %s, TRUE)""",
+                (profile_id, "Resume 1", json.dumps(roles), json.dumps(skills))
+            )
+            conn.commit()
+            print(f"Migrated profile {profile_id} to Resume 1")
+        cursor.close()
+        conn.close()
+
     def get_all_target_roles(self):
-        """Return the union of target_roles across all user profiles.
+        """Return the union of target_roles across ALL resumes of ALL users.
         Used by daily_collect.py so the shared pool covers every user's needs.
+        Falls back to profiles table if resumes table is empty.
         """
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT target_roles FROM profiles WHERE target_roles IS NOT NULL')
+
+        # Try resumes table first (new architecture)
+        cursor.execute('SELECT target_roles FROM resumes WHERE target_roles IS NOT NULL')
         rows = cursor.fetchall()
+
+        # Fall back to profiles table if no resumes yet
+        if not rows:
+            cursor.execute('SELECT target_roles FROM profiles WHERE target_roles IS NOT NULL')
+            rows = cursor.fetchall()
+
         conn.close()
 
-        import json
         seen = set()
         roles = []
         for row in rows:
@@ -704,8 +862,8 @@ class JobHunterDB:
         finally:
             conn.close()
 
-    def get_global_jobs_for_user(self, profile_id, hours=24):
-        """Get global jobs not yet analyzed or rejected by this user."""
+    def get_global_jobs_for_user(self, profile_id, hours=24, resume_id=None):
+        """Get global jobs not yet analyzed or rejected by this user+resume combo."""
         conn = self.get_connection()
         cursor = conn.cursor()
         cutoff = datetime.now() - timedelta(hours=hours)
@@ -714,10 +872,12 @@ class JobHunterDB:
             WHERE g.scraped_at >= %s
             AND NOT EXISTS (
                 SELECT 1 FROM user_job_status u
-                WHERE u.profile_id = %s AND u.job_id = g.job_id
+                WHERE u.profile_id = %s
+                AND u.job_id = g.job_id
+                AND (u.resume_id = %s OR %s IS NULL)
             )
             ORDER BY g.scraped_at DESC
-        ''', (cutoff, profile_id))
+        ''', (cutoff, profile_id, resume_id, resume_id))
         rows = cursor.fetchall()
         conn.close()
         return [{
@@ -726,16 +886,16 @@ class JobHunterDB:
             'source': r[7], 'scraped_at': str(r[8]), 'status': 'pending'
         } for r in rows]
 
-    def mark_global_job_status(self, profile_id, job_id, status):
-        """Mark a global job as analyzed/rejected for this user."""
+    def mark_global_job_status(self, profile_id, job_id, status, resume_id=None):
+        """Mark a global job as analyzed/rejected for this user+resume combo."""
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute('''
-            INSERT INTO user_job_status (profile_id, job_id, status)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (profile_id, job_id) DO UPDATE SET status = EXCLUDED.status
-            ''', (profile_id, job_id, status))
+            INSERT INTO user_job_status (profile_id, resume_id, job_id, status)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (profile_id, resume_id, job_id) DO UPDATE SET status = EXCLUDED.status
+            ''', (profile_id, resume_id, job_id, status))
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -818,40 +978,34 @@ class JobHunterDB:
         cursor.close()
         conn.close()
     
-    def save_analyzed_job(self, profile_id, job_id, analysis):
-        """Save analyzed job — looks up details from global_raw_jobs (primary)
-        then falls back to legacy raw_jobs table."""
+    def save_analyzed_job(self, profile_id, job_id, analysis, resume_id=None):
+        """Save analyzed job per resume. Looks up from global_raw_jobs, falls back to raw_jobs."""
         conn = self.get_connection()
         cursor = conn.cursor()
 
-        # Try global_raw_jobs first (current architecture)
         cursor.execute('SELECT company, title, url FROM global_raw_jobs WHERE job_id = %s', (job_id,))
         job = cursor.fetchone()
-
-        # Fall back to legacy raw_jobs
         if not job:
             cursor.execute('SELECT company, title, url FROM raw_jobs WHERE job_id = %s', (job_id,))
             job = cursor.fetchone()
 
         if job:
-            # Use ON CONFLICT so re-runs don't create duplicates
             cursor.execute('''
             INSERT INTO analyzed_jobs (
-                profile_id, job_id, company, title, url, tier, match_score,
-                experience_required, role_match_pct, skill_match_pct, reasoning,
-                tailored_bullets
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (profile_id, job_id) DO UPDATE SET
-                tier             = EXCLUDED.tier,
-                match_score      = EXCLUDED.match_score,
+                profile_id, resume_id, job_id, company, title, url, tier, match_score,
+                experience_required, role_match_pct, skill_match_pct, reasoning, tailored_bullets
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (profile_id, resume_id, job_id) DO UPDATE SET
+                tier              = EXCLUDED.tier,
+                match_score       = EXCLUDED.match_score,
                 experience_required = EXCLUDED.experience_required,
-                role_match_pct   = EXCLUDED.role_match_pct,
-                skill_match_pct  = EXCLUDED.skill_match_pct,
-                reasoning        = EXCLUDED.reasoning,
-                tailored_bullets = EXCLUDED.tailored_bullets,
-                analyzed_at      = CURRENT_TIMESTAMP
+                role_match_pct    = EXCLUDED.role_match_pct,
+                skill_match_pct   = EXCLUDED.skill_match_pct,
+                reasoning         = EXCLUDED.reasoning,
+                tailored_bullets  = EXCLUDED.tailored_bullets,
+                analyzed_at       = CURRENT_TIMESTAMP
             ''', (
-                profile_id, job_id, job[0], job[1], job[2],
+                profile_id, resume_id, job_id, job[0], job[1], job[2],
                 analysis.get('tier'), analysis.get('match_score'),
                 analysis.get('experience_required_min'),
                 analysis.get('role_match_percentage'),
@@ -861,25 +1015,37 @@ class JobHunterDB:
             ))
             conn.commit()
         else:
-            print(f"Warning: job_id {job_id} not found in global_raw_jobs or raw_jobs — skipping save")
+            print(f"Warning: job_id {job_id} not found — skipping save")
 
         cursor.close()
         conn.close()
     
-    def get_analyzed_jobs(self, profile_id, tier=None):
-        """Get analyzed jobs"""
+    def get_analyzed_jobs(self, profile_id, tier=None, resume_id=None):
+        """Get analyzed jobs for a specific resume (or all if resume_id is None)."""
         conn = self.get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        if tier:
+
+        if tier and resume_id:
             cursor.execute('''
-            SELECT * FROM analyzed_jobs 
+            SELECT * FROM analyzed_jobs
+            WHERE profile_id = %s AND resume_id = %s AND tier = %s
+            ORDER BY match_score DESC
+            ''', (profile_id, resume_id, tier))
+        elif resume_id:
+            cursor.execute('''
+            SELECT * FROM analyzed_jobs
+            WHERE profile_id = %s AND resume_id = %s
+            ORDER BY tier ASC, match_score DESC
+            ''', (profile_id, resume_id))
+        elif tier:
+            cursor.execute('''
+            SELECT * FROM analyzed_jobs
             WHERE profile_id = %s AND tier = %s
             ORDER BY match_score DESC
             ''', (profile_id, tier))
         else:
             cursor.execute('''
-            SELECT * FROM analyzed_jobs 
+            SELECT * FROM analyzed_jobs
             WHERE profile_id = %s
             ORDER BY tier ASC, match_score DESC
             ''', (profile_id,))

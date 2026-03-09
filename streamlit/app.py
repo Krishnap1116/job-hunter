@@ -732,14 +732,90 @@ else:
     profile       = db.get_profile_by_id(profile_id)
     api_keys      = db.get_api_keys(profile_id)
     stats         = db.get_stats(profile_id)
-    user_lookback = db.get_job_lookback_hours(profile_id)  # defined here so all pages can use it
+    user_lookback = db.get_job_lookback_hours(profile_id)
+
+    # Ensure every profile has at least one resume (migrates old profiles)
+    db.ensure_default_resume(profile_id)
+    all_resumes    = db.get_resumes(profile_id)
+    active_resume  = db.get_active_resume(profile_id)
+    active_resume_id = active_resume['id'] if active_resume else None
 
     # ══════════════════════════════════════════
     # HOME — Smart auto-analyze dashboard
     # ══════════════════════════════════════════
     if st.session_state.page == "home":
 
-        pending_jobs  = db.get_global_jobs_for_user(profile_id, hours=user_lookback)
+        # ── Resume switcher ───────────────────────────────────
+        if len(all_resumes) > 0:
+            resume_labels = {r['id']: f"{'✅ ' if r['is_active'] else ''}{r['label']}" for r in all_resumes}
+            col_res, col_add = st.columns([4, 1])
+            with col_res:
+                selected_resume_id = st.selectbox(
+                    "Active Resume",
+                    options=[r['id'] for r in all_resumes],
+                    format_func=lambda rid: resume_labels[rid],
+                    index=next((i for i, r in enumerate(all_resumes) if r['is_active']), 0),
+                    key="resume_switcher",
+                    label_visibility="collapsed"
+                )
+            with col_add:
+                if st.button("＋ Resume", use_container_width=True):
+                    st.session_state.show_add_resume = True
+
+            if selected_resume_id != active_resume_id:
+                db.set_active_resume(profile_id, selected_resume_id)
+                st.session_state.auto_analyzed = False
+                st.session_state.auto_analyzing = False
+                st.rerun()
+
+            # Add resume wizard — auto-parse with Claude
+            if st.session_state.get('show_add_resume'):
+                with st.expander("➕ Add New Resume", expanded=True):
+                    if len(all_resumes) >= 3:
+                        st.warning("Maximum 3 resumes reached. Delete one before adding a new one.")
+                        if st.button("Cancel", key="cancel_add_res_max"):
+                            st.session_state.show_add_resume = False
+                            st.rerun()
+                    else:
+                        new_label = st.text_input("Label (e.g. 'ML Engineer', 'PM Resume')", key="new_res_label")
+                        uploaded_res = st.file_uploader("Upload Resume PDF", type=["pdf"], key="new_res_pdf")
+                        st.caption("Claude will auto-parse target roles and skills (~$0.01 cost)")
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            if st.button("Parse & Add Resume", type="primary", key="parse_add_btn"):
+                                if not new_label.strip():
+                                    st.error("Please enter a label.")
+                                elif not uploaded_res:
+                                    st.error("Please upload a PDF.")
+                                elif not api_keys.get('anthropic_key'):
+                                    st.error("Anthropic API key required to parse resume.")
+                                else:
+                                    with st.spinner("Parsing resume with Claude..."):
+                                        try:
+                                            from resume_parser import ResumeParser
+                                            parser = ResumeParser(api_key=api_keys['anthropic_key'])
+                                            pdf_bytes = uploaded_res.read()
+                                            parsed = parser.parse_resume(pdf_bytes)
+                                            roles_list  = parsed.get('target_roles', [])
+                                            skills_list = parsed.get('core_skills', [])
+                                            resume_text = parsed.get('resume_text', '')
+                                            db.create_resume(
+                                                profile_id, new_label.strip(),
+                                                roles_list, skills_list, resume_text,
+                                                make_active=True
+                                            )
+                                            st.session_state.show_add_resume = False
+                                            st.session_state.auto_analyzed = False
+                                            st.session_state.auto_analyzing = False
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.error(f"Parse error: {e}")
+                        with c2:
+                            if st.button("Cancel", key="cancel_add_res"):
+                                st.session_state.show_add_resume = False
+                                st.rerun()
+
+        pending_jobs  = db.get_global_jobs_for_user(profile_id, hours=user_lookback, resume_id=active_resume_id)
         pending_count = len(pending_jobs)
         pool_stats    = db.get_global_pool_stats()
         has_anthropic = bool(api_keys.get('anthropic_key'))
@@ -814,11 +890,17 @@ else:
         pass  # run_analysis defined at page scope below
 
     def run_analysis(jobs_to_run, label=""):
-        """Shared analysis runner — callable from any page."""
+        """Shared analysis runner — uses active resume's roles/skills for matching."""
         claude_cfg = db.get_claude_filter_config(profile_id)
-        matcher    = IntegratedMatcher(
+        # Build profile dict from active resume so each resume gets its own match scoring
+        active_res = db.get_active_resume(profile_id)
+        analysis_profile = dict(profile)
+        if active_res:
+            analysis_profile['target_roles'] = active_res.get('target_roles', profile.get('target_roles', []))
+            analysis_profile['core_skills']  = active_res.get('core_skills',  profile.get('core_skills', []))
+        matcher = IntegratedMatcher(
             anthropic_api_key=api_keys['anthropic_key'],
-            profile=profile,
+            profile=analysis_profile,
             filter_config=claude_cfg
         )
 
@@ -831,7 +913,7 @@ else:
         filtered_ids = {j['job_id'] for j in filtered}
         for job in jobs_to_run:
             if job['job_id'] not in filtered_ids:
-                db.mark_global_job_status(profile_id, job['job_id'], 'rejected')
+                db.mark_global_job_status(profile_id, job['job_id'], 'rejected', resume_id=active_resume_id)
 
         if not filtered:
             return 0, 0, rejected_pf, reasons
@@ -853,12 +935,12 @@ else:
                     analysis['tailored_bullets'] = matcher.generate_tailored_bullets(job, analysis)
                 else:
                     analysis['tailored_bullets'] = []
-                db.save_analyzed_job(profile_id, job['job_id'], analysis)
-                db.mark_global_job_status(profile_id, job['job_id'], 'analyzed')
+                db.save_analyzed_job(profile_id, job['job_id'], analysis, resume_id=active_resume_id)
+                db.mark_global_job_status(profile_id, job['job_id'], 'analyzed', resume_id=active_resume_id)
                 if analysis.get('tier') == 1: t1 += 1
                 elif analysis.get('tier') == 2: t2 += 1
             else:
-                db.mark_global_job_status(profile_id, job['job_id'], 'rejected')
+                db.mark_global_job_status(profile_id, job['job_id'], 'rejected', resume_id=active_resume_id)
                 rej += 1
 
             time.sleep(0.35)
@@ -907,7 +989,7 @@ else:
             st.rerun()
 
         if st.session_state.get('auto_analyzing'):
-            fresh_pending = db.get_global_jobs_for_user(profile_id, hours=user_lookback)
+            fresh_pending = db.get_global_jobs_for_user(profile_id, hours=user_lookback, resume_id=active_resume_id)
             batch = fresh_pending[:30]  # cap at 30 — ~$0.06 per run
 
             st.markdown(f"### 🤖 Analyzing {len(batch)} new jobs for you...")
@@ -956,7 +1038,7 @@ else:
 
             if st.session_state.get('analyzing'):
                 limit = st.session_state.pop('pending_analyze_limit', 30)
-                jobs_to_run = db.get_global_jobs_for_user(profile_id, hours=user_lookback)[:limit]
+                jobs_to_run = db.get_global_jobs_for_user(profile_id, hours=user_lookback, resume_id=active_resume_id)[:limit]
                 if jobs_to_run:
                     t1, t2, rej, reasons = run_analysis(jobs_to_run, label="Analyzing")
                     st.session_state.analyzing = False
@@ -1000,7 +1082,7 @@ else:
                         st.session_state.manual_collect  = False
                         st.session_state.collect_done    = True
                         st.session_state.auto_analyzed   = False  # allow re-analyze after fresh collect
-                        pending_jobs  = db.get_global_jobs_for_user(profile_id, hours=user_lookback)
+                        pending_jobs  = db.get_global_jobs_for_user(profile_id, hours=user_lookback, resume_id=active_resume_id)
                         pending_count = len(pending_jobs)
                         st.rerun()
 
@@ -1019,7 +1101,7 @@ else:
             # After manual collect: show confirm-to-analyze button
             if st.session_state.get('manual_collect_done_pending'):
                 new_ct = st.session_state.get('manual_collect_new_count', 0)
-                fresh_pending_ct = len(db.get_global_jobs_for_user(profile_id, hours=user_lookback))
+                fresh_pending_ct = len(db.get_global_jobs_for_user(profile_id, hours=user_lookback, resume_id=active_resume_id))
                 st.markdown(f"**{new_ct} new jobs collected.** {fresh_pending_ct} unanalyzed jobs ready.")
                 c1, c2, c3 = st.columns([1, 2, 2])
                 with c1:
@@ -1035,7 +1117,7 @@ else:
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.button("🤖  Analyze Now", type="primary", use_container_width=True, key="post_collect_analyze"):
                         st.session_state.manual_collect_done_pending = False
-                        batch = db.get_global_jobs_for_user(profile_id, hours=user_lookback)[:alimit]
+                        batch = db.get_global_jobs_for_user(profile_id, hours=user_lookback, resume_id=active_resume_id)[:alimit]
                         st.markdown("**Running AI analysis...**")
                         t1, t2, rej, reasons = run_analysis(batch)
                         db.set_last_analyzed(profile_id)
@@ -1092,7 +1174,7 @@ else:
                         st.session_state.analyzing = True
 
                 if st.session_state.get('analyzing'):
-                    jobs_to_run = db.get_global_jobs_for_user(profile_id, hours=user_lookback)[:analyze_limit]
+                    jobs_to_run = db.get_global_jobs_for_user(profile_id, hours=user_lookback, resume_id=active_resume_id)[:analyze_limit]
                     st.markdown("**Running AI analysis...**")
                     t1, t2, rej, reasons = run_analysis(jobs_to_run)
                     st.session_state.analyzing     = False
@@ -1118,12 +1200,12 @@ else:
     # MATCHES
     # ══════════════════════════════════════════
     elif st.session_state.page == "matches":
-        t1_jobs = db.get_analyzed_jobs(profile_id, tier=1)
-        t2_jobs = db.get_analyzed_jobs(profile_id, tier=2)
+        t1_jobs = db.get_analyzed_jobs(profile_id, tier=1, resume_id=active_resume_id)
+        t2_jobs = db.get_analyzed_jobs(profile_id, tier=2, resume_id=active_resume_id)
         total   = len(t1_jobs) + len(t2_jobs)
 
         # Check if new unanalyzed jobs are available
-        new_pending = db.get_global_jobs_for_user(profile_id, hours=user_lookback)
+        new_pending = db.get_global_jobs_for_user(profile_id, hours=user_lookback, resume_id=active_resume_id)
         new_count   = len(new_pending)
 
         # Header row
@@ -1557,57 +1639,46 @@ else:
                         <div style="color:#e2e8f0;">{profile.get('experience_years','?')} years · {profile.get('experience_level','?').title()}</div>
                     </div>
                     <div>
-                        <div style="color:#475569;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Skills extracted</div>
-                        <div style="color:#e2e8f0;">{len(profile.get('core_skills',[]))}</div>
+                        <div style="color:#475569;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Resumes</div>
+                        <div style="color:#e2e8f0;">{len(all_resumes)}</div>
                     </div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
             st.markdown("---")
+            st.markdown('<div class="sec-hdr">Manage Resumes</div>', unsafe_allow_html=True)
+            st.caption("Each resume has its own target roles, skills, and match history. Switch between them from the Home page dropdown.")
 
-            # ── Editable: Target Roles ─────────────────────────
-            st.markdown('<div class="sec-hdr">Target Roles</div>', unsafe_allow_html=True)
-            st.caption("These are what Claude extracted from your resume. Edit them to match what you're actually looking for. One role per line.")
+            for res in all_resumes:
+                active_badge = " 🟢 Active" if res['is_active'] else ""
+                with st.expander(f"{res['label']}{active_badge}", expanded=res['is_active']):
+                    r_label  = st.text_input("Label", value=res['label'], key=f"rlabel_{res['id']}")
+                    r_roles  = st.text_area("Target roles (one per line)",
+                                            value="\n".join(res.get('target_roles', [])),
+                                            height=120, key=f"rroles_{res['id']}")
+                    r_skills = st.text_area("Core skills (comma-separated)",
+                                            value=", ".join(res.get('core_skills', [])),
+                                            height=80, key=f"rskills_{res['id']}")
 
-            current_roles = profile.get('target_roles', [])
-            roles_text = st.text_area(
-                "Target roles (one per line)",
-                value="\n".join(current_roles),
-                height=140,
-                label_visibility="collapsed",
-                help="Examples: machine learning engineer, software engineer, data scientist"
-            )
-
-            # ── Editable: Core Skills ──────────────────────────
-            st.markdown('<div class="sec-hdr" style="margin-top:16px;">Core Skills</div>', unsafe_allow_html=True)
-            st.caption("Edit your skills list. Comma-separated. Claude uses this to score skill match %.")
-
-            current_skills = profile.get('core_skills', [])
-            skills_text = st.text_area(
-                "Core skills (comma-separated)",
-                value=", ".join(current_skills),
-                height=120,
-                label_visibility="collapsed",
-                help="Examples: Python, PyTorch, LLMs, SQL, React, Kubernetes"
-            )
-
-            if st.button("💾  Save Profile Changes", type="primary"):
-                new_roles  = [r.strip() for r in roles_text.split("\n") if r.strip()]
-                new_skills = [s.strip() for s in skills_text.split(",")  if s.strip()]
-
-                if not new_roles:
-                    st.error("Please enter at least one target role.")
-                else:
-                    db.update_profile_roles_skills(profile_id, new_roles, new_skills)
-                    # Reset last_analyzed_at so new roles trigger a fresh analysis run
-                    # (old results were scored against old roles)
-                    conn = db.get_connection()
-                    cur  = conn.cursor()
-                    ph   = '%s' if hasattr(db, 'db_config') else '?'
-                    cur.execute(f'UPDATE profiles SET last_analyzed_at = NULL WHERE id = {ph}', (profile_id,))
-                    conn.commit()
-                    cur.close()
-                    conn.close()
-                    st.success(f"✅ Saved — {len(new_roles)} roles, {len(new_skills)} skills. Next analysis will use your updated profile.")
-                    st.rerun()
+                    ca, cb, cc = st.columns(3)
+                    with ca:
+                        if st.button("💾 Save", key=f"rsave_{res['id']}", type="primary"):
+                            new_roles  = [r.strip() for r in r_roles.split("\n")  if r.strip()]
+                            new_skills = [s.strip() for s in r_skills.split(",") if s.strip()]
+                            db.update_resume(res['id'], r_label.strip(), new_roles, new_skills)
+                            if res['is_active']:
+                                db.set_active_resume(profile_id, res['id'])  # resets last_analyzed_at
+                            st.success("Saved.")
+                            st.rerun()
+                    with cb:
+                        if not res['is_active']:
+                            if st.button("✅ Set Active", key=f"ract_{res['id']}"):
+                                db.set_active_resume(profile_id, res['id'])
+                                st.session_state.auto_analyzed = False
+                                st.rerun()
+                    with cc:
+                        if len(all_resumes) > 1:
+                            if st.button("🗑 Delete", key=f"rdel_{res['id']}"):
+                                db.delete_resume(profile_id, res['id'])
+                                st.rerun()
