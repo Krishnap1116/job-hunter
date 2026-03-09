@@ -1471,8 +1471,25 @@ else:
             st.caption("ℹ️ Jobs are collected once daily via GitHub Actions. The collection time is global and set in the workflow file — it is not configurable per user.")
 
             if st.button("Save", type="primary"):
+                prev_lookback = cur_lookback
                 db.set_job_lookback_hours(profile_id, selected_lookback)
-                st.success(f"✅ Saved — looking back {selected_lookback}h for new jobs.")
+                # If user widened the window, reset last_analyzed_at so the next
+                # login re-analyzes jobs that were previously outside the window
+                if selected_lookback > prev_lookback:
+                    conn = db.get_connection()
+                    cur  = conn.cursor()
+                    ph   = '%s' if hasattr(db, 'db_config') else '?'
+                    cur.execute(f'UPDATE profiles SET last_analyzed_at = NULL WHERE id = {ph}', (profile_id,))
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    # Reset auto_analyzed so home page triggers fresh analysis immediately
+                    st.session_state.auto_analyzed = False
+                    st.session_state.auto_analyzing = False
+                    st.session_state.page = 'home'
+                    st.rerun()
+                else:
+                    st.success(f"✅ Saved — looking back {selected_lookback}h for new jobs.")
 
         # ── PROFILE ───────────────────────────
         with tab_profile:
