@@ -90,7 +90,34 @@ class JobHunterDB:
         )
         ''')
         
-        # Raw jobs
+        # Global raw jobs — shared pool scraped once daily, no profile_id
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS global_raw_jobs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id      TEXT UNIQUE,
+            company     TEXT,
+            title       TEXT,
+            url         TEXT,
+            location    TEXT,
+            description TEXT,
+            source      TEXT,
+            scraped_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        # Per-user status tracking — did this user already analyze/reject this global job?
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_job_status (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id INTEGER,
+            job_id     TEXT,
+            status     TEXT DEFAULT 'pending',
+            UNIQUE(profile_id, job_id),
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+        )
+        ''')
+
+        # Raw jobs (legacy per-user, kept for backward compat)
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS raw_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,7 +205,31 @@ class JobHunterDB:
                 ADD COLUMN tailored_bullets TEXT DEFAULT '[]'
                 ''')
                 print("✅ Added tailored_bullets column")
+
+            if 'applied' not in aj_columns:
+                cursor.execute('''
+                ALTER TABLE analyzed_jobs
+                ADD COLUMN applied INTEGER DEFAULT 0
+                ''')
+                print("✅ Added applied column")
+
+            if 'applied_at' not in aj_columns:
+                cursor.execute('''
+                ALTER TABLE analyzed_jobs
+                ADD COLUMN applied_at TIMESTAMP
+                ''')
+                print("✅ Added applied_at column")
             
+            # Add last_analyzed_at to profiles if missing
+            cursor.execute("PRAGMA table_info(profiles)")
+            prof_columns = [col[1] for col in cursor.fetchall()]
+            if 'last_analyzed_at' not in prof_columns:
+                cursor.execute('''
+                ALTER TABLE profiles
+                ADD COLUMN last_analyzed_at TIMESTAMP
+                ''')
+                print("Added last_analyzed_at column")
+
             conn.commit()
         except Exception as e:
             print(f"Migration error: {e}")
@@ -210,16 +261,15 @@ class JobHunterDB:
             cursor.execute('INSERT INTO pre_filter_config (profile_id) VALUES (?)', (profile_id,))
             cursor.execute('INSERT INTO claude_filter_config (profile_id) VALUES (?)', (profile_id,))
             
-            # ✅ NEW: Auto-populate API keys from environment
+            # Auto-populate API keys from environment/secrets
             anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-            openrouter_key = os.getenv("OPENROUTER_API_KEY")
-            jsearch_key = os.getenv("JSEARCH_API_KEY")      # ← ADD
-            adzuna_id = os.getenv("ADZUNA_APP_ID")          # ← ADD
-            adzuna_key = os.getenv("ADZUNA_API_KEY") 
+            jsearch_key = os.getenv("JSEARCH_API_KEY")
+            adzuna_id = os.getenv("ADZUNA_APP_ID")
+            adzuna_key = os.getenv("ADZUNA_API_KEY")
             cursor.execute('''
-            INSERT INTO api_keys (profile_id, anthropic_key, openrouter_key)
-            VALUES (?, ?, ?)
-            ''', (profile_id, anthropic_key, openrouter_key))
+            INSERT INTO api_keys (profile_id, anthropic_key, jsearch_key, adzuna_id, adzuna_key)
+            VALUES (?, ?, ?, ?, ?)
+            ''', (profile_id, anthropic_key, jsearch_key, adzuna_id, adzuna_key))
             
             conn.commit()
             return profile_id
@@ -416,6 +466,26 @@ class JobHunterDB:
         conn.close()
     
     # Schedule
+    def set_last_analyzed(self, profile_id):
+        """Record that analysis was just run for this user (persists across browser refreshes)."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE profiles SET last_analyzed_at = CURRENT_TIMESTAMP WHERE id = ?',
+            (profile_id,)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_last_analyzed(self, profile_id):
+        """Return last_analyzed_at timestamp string, or None."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT last_analyzed_at FROM profiles WHERE id = ?', (profile_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
     def update_schedule_settings(self, profile_id, collection_time, auto_collect_enabled):
         """Update schedule"""
         conn = self.get_connection()
@@ -428,6 +498,89 @@ class JobHunterDB:
         conn.close()
     
     # Jobs
+    # ─────────────────────────────────────────
+    # Global job pool (shared across all users)
+    # ─────────────────────────────────────────
+
+    def save_global_job(self, job_data):
+        """Save a job to the shared global pool. Returns True if new, False if duplicate."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+            INSERT INTO global_raw_jobs (job_id, company, title, url, location, description, source, scraped_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (
+                job_data['job_id'], job_data['company'], job_data['title'],
+                job_data['url'], job_data.get('location', ''),
+                job_data.get('description', ''), job_data.get('source', ''),
+            ))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False  # Already exists
+        finally:
+            conn.close()
+
+    def get_global_jobs_for_user(self, profile_id, hours=48):
+        """Get global jobs not yet analyzed or rejected by this user."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cutoff = (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute('''
+            SELECT g.* FROM global_raw_jobs g
+            WHERE g.scraped_at >= ?
+            AND NOT EXISTS (
+                SELECT 1 FROM user_job_status u
+                WHERE u.profile_id = ? AND u.job_id = g.job_id
+            )
+            ORDER BY g.scraped_at DESC
+        ''', (cutoff, profile_id))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{
+            'id': r[0], 'job_id': r[1], 'company': r[2], 'title': r[3],
+            'url': r[4], 'location': r[5], 'description': r[6],
+            'source': r[7], 'scraped_at': r[8], 'status': 'pending'
+        } for r in rows]
+
+    def mark_global_job_status(self, profile_id, job_id, status):
+        """Mark a global job as analyzed/rejected for this user."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+            INSERT INTO user_job_status (profile_id, job_id, status)
+            VALUES (?, ?, ?)
+            ON CONFLICT(profile_id, job_id) DO UPDATE SET status = excluded.status
+            ''', (profile_id, job_id, status))
+            conn.commit()
+        except Exception as e:
+            print(f"mark_global_job_status error: {e}")
+        finally:
+            conn.close()
+
+    def get_global_pool_stats(self):
+        """How many jobs in the pool and when last scraped."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*), MAX(scraped_at) FROM global_raw_jobs')
+        row = cursor.fetchone()
+        conn.close()
+        return {'total': row[0] or 0, 'last_scraped': row[1]}
+
+    def purge_old_global_jobs(self, days=7):
+        """Remove global jobs older than N days to keep the pool fresh."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute('DELETE FROM global_raw_jobs WHERE scraped_at < ?', (cutoff,))
+        cursor.execute('DELETE FROM user_job_status WHERE job_id NOT IN (SELECT job_id FROM global_raw_jobs)')
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return deleted
+
     def save_raw_job(self, profile_id, job_data):
         """Save raw job"""
         conn = self.get_connection()
@@ -494,6 +647,38 @@ class JobHunterDB:
             conn.commit()
         conn.close()
     
+    def mark_job_applied(self, job_id):
+        """Mark a job as applied."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                UPDATE analyzed_jobs
+                SET applied = 1, applied_at = CURRENT_TIMESTAMP
+                WHERE job_id = ?
+            ''', (job_id,))
+            conn.commit()
+        except Exception as e:
+            print(f"mark_job_applied error: {e}")
+        finally:
+            conn.close()
+
+    def unmark_job_applied(self, job_id):
+        """Unmark a job as applied (undo)."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                UPDATE analyzed_jobs
+                SET applied = 0, applied_at = NULL
+                WHERE job_id = ?
+            ''', (job_id,))
+            conn.commit()
+        except Exception as e:
+            print(f"unmark_job_applied error: {e}")
+        finally:
+            conn.close()
+
     def get_analyzed_jobs(self, profile_id, tier=None):
         """Get analyzed jobs"""
         conn = self.get_connection()
@@ -519,7 +704,8 @@ class JobHunterDB:
             'experience_required': job[8], 'role_match_pct': job[9],
             'skill_match_pct': job[10], 'reasoning': job[11],
             'tailored_bullets': json.loads(job[12]) if len(job) > 12 and job[12] else [],
-            'analyzed_at': job[13] if len(job) > 13 else job[12]
+            'analyzed_at': job[13] if len(job) > 13 else None,
+            'applied': bool(job[14]) if len(job) > 14 and job[14] else False,
         } for job in jobs]
     
     def get_stats(self, profile_id):

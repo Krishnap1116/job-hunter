@@ -45,3 +45,13 @@ Thumbs.db
 *.tmp
 tmp/
 temp/
+
+# Database
+job_hunter.db
+*.db
+*.sqlite3
+
+# Binary / build artifacts
+job-hunter
+# macOS
+.DS_Store

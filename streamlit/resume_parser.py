@@ -17,14 +17,13 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 #     print("\nSet it with: export ANTHROPIC_API_KEY='sk-ant-...'")
 #     exit(1)
 
-def parse_resume_with_claude(resume_path):
+def parse_resume_with_claude(resume_path, api_key=None):
     """Parse resume PDF"""
-    # Don't get API key here - will be provided by caller
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    
+    api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+
     if not api_key:
         raise Exception("ANTHROPIC_API_KEY not found in environment")
-    
+
     client = anthropic.Anthropic(api_key=api_key)
     
     print(f"📄 Reading resume: {resume_path}")

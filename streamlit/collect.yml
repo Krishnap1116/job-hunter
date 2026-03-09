@@ -1,0 +1,30 @@
+name: Daily Job Collection
+
+on:
+  schedule:
+    - cron: '0 9 * * *'   # 9 AM UTC every day
+  workflow_dispatch:        # also run manually from GitHub Actions tab
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r streamlit/requirements.txt
+
+      - name: Run job collector
+        env:
+          DATABASE_URL:     ${{ secrets.DATABASE_URL }}
+          JSEARCH_API_KEY:  ${{ secrets.JSEARCH_API_KEY }}
+          ADZUNA_APP_ID:    ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_API_KEY:   ${{ secrets.ADZUNA_API_KEY }}
+        run: python streamlit/daily_collect.py
