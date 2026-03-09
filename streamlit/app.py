@@ -728,17 +728,17 @@ if st.session_state.profile_id is None:
 # LOGGED IN
 # ═══════════════════════════════════════════════════════════
 else:
-    profile_id = st.session_state.profile_id
-    profile    = db.get_profile_by_id(profile_id)
-    api_keys   = db.get_api_keys(profile_id)
-    stats      = db.get_stats(profile_id)
+    profile_id    = st.session_state.profile_id
+    profile       = db.get_profile_by_id(profile_id)
+    api_keys      = db.get_api_keys(profile_id)
+    stats         = db.get_stats(profile_id)
+    user_lookback = db.get_job_lookback_hours(profile_id)  # defined here so all pages can use it
 
     # ══════════════════════════════════════════
     # HOME — Smart auto-analyze dashboard
     # ══════════════════════════════════════════
     if st.session_state.page == "home":
 
-        user_lookback = db.get_job_lookback_hours(profile_id)
         pending_jobs  = db.get_global_jobs_for_user(profile_id, hours=user_lookback)
         pending_count = len(pending_jobs)
         pool_stats    = db.get_global_pool_stats()
