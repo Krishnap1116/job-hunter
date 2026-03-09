@@ -811,59 +811,64 @@ else:
         # If there are new jobs AND the user has an API key AND we haven't
         # auto-analyzed this session yet → run automatically, no click needed.
         # ─────────────────────────────────────────────────────
-        def run_analysis(jobs_to_run, label=""):
-            """Shared analysis runner — used for both auto and manual."""
-            claude_cfg = db.get_claude_filter_config(profile_id)
-            matcher    = IntegratedMatcher(
-                anthropic_api_key=api_keys['anthropic_key'],
-                profile=profile,
-                filter_config=claude_cfg
-            )
+        pass  # run_analysis defined at page scope below
 
-            # Pre-filter (instant, no API cost)
-            filtered, reasons = matcher.pre_filter(jobs_to_run)
-            passed   = len(filtered)
-            rejected_pf = len(jobs_to_run) - passed
+    def run_analysis(jobs_to_run, label=""):
+        """Shared analysis runner — callable from any page."""
+        claude_cfg = db.get_claude_filter_config(profile_id)
+        matcher    = IntegratedMatcher(
+            anthropic_api_key=api_keys['anthropic_key'],
+            profile=profile,
+            filter_config=claude_cfg
+        )
 
-            # Mark pre-filter rejects immediately
-            filtered_ids = {j['job_id'] for j in filtered}
-            for job in jobs_to_run:
-                if job['job_id'] not in filtered_ids:
-                    db.mark_global_job_status(profile_id, job['job_id'], 'rejected')
+        # Pre-filter (instant, no API cost)
+        filtered, reasons = matcher.pre_filter(jobs_to_run)
+        passed   = len(filtered)
+        rejected_pf = len(jobs_to_run) - passed
 
-            if not filtered:
-                return 0, 0, rejected_pf, reasons
+        # Mark pre-filter rejects immediately
+        filtered_ids = {j['job_id'] for j in filtered}
+        for job in jobs_to_run:
+            if job['job_id'] not in filtered_ids:
+                db.mark_global_job_status(profile_id, job['job_id'], 'rejected')
 
-            # AI analysis with progress bar
-            bar    = st.progress(0)
-            status = st.empty()
-            t1 = t2 = rej = 0
-            total  = max(len(filtered), 1)
+        if not filtered:
+            return 0, 0, rejected_pf, reasons
 
-            for i, job in enumerate(filtered):
-                status.caption(f"{'🤖 ' + label + ' · ' if label else ''}{i+1}/{len(filtered)} — {job['company']}: {job['title'][:45]}")
-                bar.progress((i + 1) / total)
+        # AI analysis with progress bar
+        bar    = st.progress(0)
+        status = st.empty()
+        t1 = t2 = rej = 0
+        total  = max(len(filtered), 1)
 
-                analysis = matcher.analyze_job(job)
+        for i, job in enumerate(filtered):
+            status.caption(f"{'🤖 ' + label + ' · ' if label else ''}{i+1}/{len(filtered)} — {job['company']}: {job['title'][:45]}")
+            bar.progress((i + 1) / total)
 
-                if analysis and matcher.is_qualified(analysis):
-                    if analysis.get('tier') == 2:
-                        analysis['tailored_bullets'] = matcher.generate_tailored_bullets(job, analysis)
-                    else:
-                        analysis['tailored_bullets'] = []
-                    db.save_analyzed_job(profile_id, job['job_id'], analysis)
-                    db.mark_global_job_status(profile_id, job['job_id'], 'analyzed')
-                    if analysis.get('tier') == 1: t1 += 1
-                    elif analysis.get('tier') == 2: t2 += 1
+            analysis = matcher.analyze_job(job)
+
+            if analysis and matcher.is_qualified(analysis):
+                if analysis.get('tier') == 2:
+                    analysis['tailored_bullets'] = matcher.generate_tailored_bullets(job, analysis)
                 else:
-                    db.mark_global_job_status(profile_id, job['job_id'], 'rejected')
-                    rej += 1
+                    analysis['tailored_bullets'] = []
+                db.save_analyzed_job(profile_id, job['job_id'], analysis)
+                db.mark_global_job_status(profile_id, job['job_id'], 'analyzed')
+                if analysis.get('tier') == 1: t1 += 1
+                elif analysis.get('tier') == 2: t2 += 1
+            else:
+                db.mark_global_job_status(profile_id, job['job_id'], 'rejected')
+                rej += 1
 
-                time.sleep(0.35)
+            time.sleep(0.35)
 
-            bar.progress(1.0)
-            status.empty()
-            return t1, t2, rej + rejected_pf, reasons
+        bar.progress(1.0)
+        status.empty()
+        return t1, t2, rej + rejected_pf, reasons
+
+    if st.session_state.page == "home":
+        pending_jobs_placeholder = None  # re-fetched below
 
         # ── Auto-analyze: fires ONCE after new jobs arrive since last analysis ──
         # We use last_analyzed_at from the DB (not session_state) so browser
@@ -927,6 +932,44 @@ else:
 
         # ── Dashboard when idle (no new jobs or already analyzed) ──
         else:
+            # Even in idle state, if there are unanalyzed jobs show the button first
+            if pending_count > 0 and has_anthropic and not st.session_state.get('analyzing'):
+                st.markdown(f"**{pending_count} unanalyzed jobs** are waiting in the pool.")
+                c1, c2, c3 = st.columns([1, 2, 2])
+                with c1:
+                    analyze_limit = st.number_input(
+                        "Jobs to analyze",
+                        min_value=1, max_value=pending_count,
+                        value=min(30, pending_count), step=5,
+                        key="idle_analyze_limit"
+                    )
+                with c2:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    est = analyze_limit * 2
+                    st.caption(f"⏱ ~{est//60}m {est%60}s &nbsp;&nbsp; 💰 ~${analyze_limit*0.002:.2f} API cost")
+                with c3:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    if st.button("🤖  Analyze Jobs", type="primary", use_container_width=True, key="idle_analyze_btn"):
+                        st.session_state.analyzing = True
+                        st.session_state.idle_analyze_limit = analyze_limit
+                        st.rerun()
+
+            if st.session_state.get('analyzing'):
+                limit = st.session_state.pop('idle_analyze_limit', 30)
+                jobs_to_run = db.get_global_jobs_for_user(profile_id, hours=user_lookback)[:limit]
+                if jobs_to_run:
+                    t1, t2, rej, reasons = run_analysis(jobs_to_run, label="Analyzing")
+                    st.session_state.analyzing = False
+                    if t1 + t2 > 0:
+                        st.success(f"✓ Done — 🌟 **{t1} Tier 1** · ⭐ **{t2} Tier 2** · {rej} filtered out")
+                        time.sleep(1.2)
+                        st.session_state.page = "matches"
+                        st.rerun()
+                    else:
+                        st.info(f"No strong matches in this batch ({rej} filtered). {pending_count - limit} jobs still waiting.")
+                        st.rerun()
+
+            st.markdown("---")
             # ── Manual collect section ─────────────────────────
             col_l, col_r = st.columns([3, 1])
             with col_l:
@@ -1029,8 +1072,9 @@ else:
                     st.rerun()
 
             elif pending_count > 0 and has_anthropic:
-                # New jobs exist but auto_analyzed already — show manual analyze option
-                st.markdown(f"**{pending_count} new jobs** are in the pool but haven't been analyzed against your profile yet.")
+                # Jobs in pool not yet analyzed — always show manual option
+                # (auto-analyze only runs 30 at a time; remaining jobs always need manual trigger)
+                st.markdown(f"**{pending_count} unanalyzed jobs** are waiting in the pool.")
                 c1, c2, c3 = st.columns([1, 2, 2])
                 with c1:
                     analyze_limit = st.number_input(
@@ -1090,8 +1134,10 @@ else:
         with hc2:
             if new_count > 0 and bool(api_keys.get('anthropic_key')):
                 if st.button(f"🤖 Analyze {new_count} New", type="primary", use_container_width=True):
-                    st.session_state.auto_analyzed = False
-                    st.session_state.page = "home"
+                    batch = new_pending[:30]
+                    t1c, t2c, rejc, _ = run_analysis(batch, label="Matches")
+                    db.set_last_analyzed(profile_id)
+                    st.success(f"✅ Done — {t1c} Tier 1, {t2c} Tier 2, {rejc} rejected")
                     st.rerun()
         with hc3:
             if st.button("← Home", use_container_width=True):
