@@ -941,7 +941,7 @@ else:
                         "Jobs to analyze",
                         min_value=1, max_value=pending_count,
                         value=min(30, pending_count), step=5,
-                        key="idle_analyze_limit"
+                        key="idle_analyze_num_input"
                     )
                 with c2:
                     st.markdown("<br>", unsafe_allow_html=True)
@@ -951,11 +951,11 @@ else:
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.button("🤖  Analyze Jobs", type="primary", use_container_width=True, key="idle_analyze_btn"):
                         st.session_state.analyzing = True
-                        st.session_state.idle_analyze_limit = analyze_limit
+                        st.session_state.pending_analyze_limit = analyze_limit
                         st.rerun()
 
             if st.session_state.get('analyzing'):
-                limit = st.session_state.pop('idle_analyze_limit', 30)
+                limit = st.session_state.pop('pending_analyze_limit', 30)
                 jobs_to_run = db.get_global_jobs_for_user(profile_id, hours=user_lookback)[:limit]
                 if jobs_to_run:
                     t1, t2, rej, reasons = run_analysis(jobs_to_run, label="Analyzing")
