@@ -37,174 +37,160 @@ class JobHunterDB:
         # Step 2: Add any missing columns (for future updates)
         self.migrate_database()
         
-        # Step 3: Clean up old data to save storage
-        self.cleanup_old_jobs(days=7)
-        
-        print("✅ PostgreSQL database ready")
+        # Cleanup runs via GitHub Actions daily_collect.py, not on every startup
+        # Running DELETE on every app boot causes deadlocks with concurrent sessions
+        print("PostgreSQL database ready")
     
     def get_connection(self):
         """Get database connection"""
         return psycopg2.connect(**self.db_config)
     
     def init_database(self):
-        """Initialize all database tables"""
+        """Initialize all database tables.
+        Each statement runs in its own try/except so a deadlock on one
+        index does not roll back the entire table-creation block.
+        """
+        ddl_statements = [
+            # Tables
+            '''CREATE TABLE IF NOT EXISTS profiles (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                experience_years TEXT,
+                experience_level TEXT,
+                core_skills TEXT,
+                target_roles TEXT,
+                forbidden_keywords TEXT,
+                collection_time TEXT DEFAULT '09:00',
+                timezone TEXT DEFAULT 'America/New_York',
+                auto_collect_enabled BOOLEAN DEFAULT TRUE,
+                last_collection_run TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''',
+            '''CREATE TABLE IF NOT EXISTS pre_filter_config (
+                id SERIAL PRIMARY KEY,
+                profile_id INTEGER UNIQUE REFERENCES profiles(id) ON DELETE CASCADE,
+                max_years_experience INTEGER DEFAULT 4,
+                reject_seniority_levels TEXT DEFAULT '["senior","staff","principal","lead","manager","director","vp","head of","chief"]',
+                reject_job_types TEXT DEFAULT '["internship","intern","part-time","freelance","contractor"]',
+                reject_specific_titles TEXT DEFAULT '["business analyst","data analyst","support engineer","technical writer","project manager","sales engineer"]',
+                check_full_description BOOLEAN DEFAULT TRUE
+            )''',
+            '''CREATE TABLE IF NOT EXISTS claude_filter_config (
+                id SERIAL PRIMARY KEY,
+                profile_id INTEGER UNIQUE REFERENCES profiles(id) ON DELETE CASCADE,
+                strict_experience_check BOOLEAN DEFAULT TRUE,
+                max_experience_required INTEGER DEFAULT 4,
+                allow_preferred_experience BOOLEAN DEFAULT TRUE,
+                min_skill_match_percent INTEGER DEFAULT 65,
+                tier1_skill_threshold INTEGER DEFAULT 85,
+                tier2_skill_threshold INTEGER DEFAULT 65,
+                min_target_role_percentage INTEGER DEFAULT 70,
+                accept_contract_to_hire BOOLEAN DEFAULT TRUE,
+                accept_contract_w2 BOOLEAN DEFAULT FALSE,
+                reject_internships BOOLEAN DEFAULT TRUE,
+                accept_part_time BOOLEAN DEFAULT FALSE,
+                requires_visa_sponsorship BOOLEAN DEFAULT TRUE,
+                reject_clearance_jobs BOOLEAN DEFAULT TRUE,
+                accept_remote_only BOOLEAN DEFAULT FALSE,
+                auto_reject_phrases TEXT DEFAULT '["us citizen only","security clearance required","no visa sponsorship"]',
+                custom_accept_employment TEXT DEFAULT '[]',
+                custom_reject_employment TEXT DEFAULT '[]'
+            )''',
+            '''CREATE TABLE IF NOT EXISTS global_raw_jobs (
+                id         SERIAL PRIMARY KEY,
+                job_id     TEXT UNIQUE,
+                company    TEXT,
+                title      TEXT,
+                url        TEXT,
+                location   TEXT,
+                description TEXT,
+                source     TEXT,
+                scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''',
+            '''CREATE TABLE IF NOT EXISTS user_job_status (
+                id         SERIAL PRIMARY KEY,
+                profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+                job_id     TEXT,
+                status     TEXT DEFAULT 'pending',
+                UNIQUE(profile_id, job_id)
+            )''',
+            '''CREATE TABLE IF NOT EXISTS raw_jobs (
+                id SERIAL PRIMARY KEY,
+                profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+                job_id TEXT UNIQUE,
+                company TEXT, title TEXT, url TEXT,
+                location TEXT, description TEXT, source TEXT,
+                scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'pending'
+            )''',
+            '''CREATE TABLE IF NOT EXISTS analyzed_jobs (
+                id SERIAL PRIMARY KEY,
+                profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+                job_id TEXT, company TEXT, title TEXT, url TEXT,
+                tier INTEGER, match_score INTEGER,
+                experience_required INTEGER,
+                role_match_pct INTEGER, skill_match_pct INTEGER,
+                reasoning TEXT,
+                tailored_bullets TEXT DEFAULT '[]',
+                applied INTEGER DEFAULT 0,
+                applied_at TIMESTAMP,
+                analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''',
+            '''CREATE TABLE IF NOT EXISTS api_keys (
+                id SERIAL PRIMARY KEY,
+                profile_id INTEGER UNIQUE REFERENCES profiles(id) ON DELETE CASCADE,
+                anthropic_key TEXT, openrouter_key TEXT,
+                jsearch_key TEXT, adzuna_id TEXT, adzuna_key TEXT
+            )''',
+        ]
+
+        # Index statements — run separately, each in its own transaction
+        # CONCURRENTLY avoids locking the table; IF NOT EXISTS avoids errors on retry
+        index_statements = [
+            'CREATE INDEX IF NOT EXISTS idx_raw_jobs_profile_status ON raw_jobs(profile_id, status)',
+            'CREATE INDEX IF NOT EXISTS idx_raw_jobs_scraped ON raw_jobs(scraped_at)',
+            'CREATE INDEX IF NOT EXISTS idx_analyzed_jobs_profile ON analyzed_jobs(profile_id, analyzed_at)',
+            'CREATE INDEX IF NOT EXISTS idx_analyzed_jobs_tier ON analyzed_jobs(profile_id, tier, match_score)',
+            'CREATE INDEX IF NOT EXISTS idx_global_jobs_scraped ON global_raw_jobs(scraped_at)',
+            'CREATE INDEX IF NOT EXISTS idx_user_job_status ON user_job_status(profile_id, job_id)',
+        ]
+
+        # Step 1: Create all tables in one transaction
         conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        # User profiles with scheduling
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS profiles (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            experience_years TEXT,
-            experience_level TEXT,
-            core_skills TEXT,
-            target_roles TEXT,
-            forbidden_keywords TEXT,
-            
-            collection_time TEXT DEFAULT '09:00',
-            timezone TEXT DEFAULT 'America/New_York',
-            auto_collect_enabled BOOLEAN DEFAULT TRUE,
-            last_collection_run TIMESTAMP,
-            
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-        
-        # PRE-FILTER settings
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS pre_filter_config (
-            id SERIAL PRIMARY KEY,
-            profile_id INTEGER UNIQUE REFERENCES profiles(id) ON DELETE CASCADE,
-            
-            max_years_experience INTEGER DEFAULT 4,
-            reject_seniority_levels TEXT DEFAULT '["senior","staff","principal","lead","manager","director","vp","head of","chief"]',
-            reject_job_types TEXT DEFAULT '["internship","intern","part-time","freelance","contractor"]',
-            reject_specific_titles TEXT DEFAULT '["business analyst","data analyst","support engineer","technical writer","project manager","sales engineer"]',
-            check_full_description BOOLEAN DEFAULT TRUE
-        )
-        ''')
-        
-        # CLAUDE ANALYSIS settings
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS claude_filter_config (
-            id SERIAL PRIMARY KEY,
-            profile_id INTEGER UNIQUE REFERENCES profiles(id) ON DELETE CASCADE,
-            
-            strict_experience_check BOOLEAN DEFAULT TRUE,
-            max_experience_required INTEGER DEFAULT 4,
-            allow_preferred_experience BOOLEAN DEFAULT TRUE,
-            
-            min_skill_match_percent INTEGER DEFAULT 65,
-            tier1_skill_threshold INTEGER DEFAULT 85,
-            tier2_skill_threshold INTEGER DEFAULT 65,
-            
-            min_target_role_percentage INTEGER DEFAULT 70,
-            
-            accept_contract_to_hire BOOLEAN DEFAULT TRUE,
-            accept_contract_w2 BOOLEAN DEFAULT FALSE,
-            reject_internships BOOLEAN DEFAULT TRUE,
-            accept_part_time BOOLEAN DEFAULT FALSE,
-            
-            requires_visa_sponsorship BOOLEAN DEFAULT TRUE,
-            reject_clearance_jobs BOOLEAN DEFAULT TRUE,
-            accept_remote_only BOOLEAN DEFAULT FALSE,
-            
-            auto_reject_phrases TEXT DEFAULT '["us citizen only","security clearance required","no visa sponsorship"]',
-            custom_accept_employment TEXT DEFAULT '[]',
-            custom_reject_employment TEXT DEFAULT '[]'
-        )
-        ''')
-        
-        # Global raw jobs — shared pool scraped once daily, no profile_id
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS global_raw_jobs (
-            id          SERIAL PRIMARY KEY,
-            job_id      TEXT UNIQUE,
-            company     TEXT,
-            title       TEXT,
-            url         TEXT,
-            location    TEXT,
-            description TEXT,
-            source      TEXT,
-            scraped_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
+        try:
+            cursor = conn.cursor()
+            for stmt in ddl_statements:
+                cursor.execute(stmt)
+            conn.commit()
+            cursor.close()
+        except Exception as e:
+            conn.rollback()
+            print(f"Table creation error: {e}")
+        finally:
+            conn.close()
 
-        # Per-user status — did this user already analyze/reject this global job?
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_job_status (
-            id         SERIAL PRIMARY KEY,
-            profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
-            job_id     TEXT,
-            status     TEXT DEFAULT 'pending',
-            UNIQUE(profile_id, job_id)
-        )
-        ''')
+        # Step 2: Create each index in its own transaction
+        # If one deadlocks or already exists, the others still succeed
+        for stmt in index_statements:
+            conn = self.get_connection()
+            try:
+                conn.autocommit = True   # required for CREATE INDEX CONCURRENTLY
+                cursor = conn.cursor()
+                # Convert to CONCURRENTLY — safe when autocommit=True
+                safe_stmt = stmt.replace(
+                    'CREATE INDEX IF NOT EXISTS',
+                    'CREATE INDEX CONCURRENTLY IF NOT EXISTS'
+                )
+                cursor.execute(safe_stmt)
+                cursor.close()
+            except Exception as e:
+                print(f"Index warning (non-fatal): {e}")
+            finally:
+                conn.close()
 
-        # Raw jobs (legacy per-user, kept for backward compat)
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS raw_jobs (
-            id SERIAL PRIMARY KEY,
-            profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
-            job_id TEXT UNIQUE,
-            company TEXT,
-            title TEXT,
-            url TEXT,
-            location TEXT,
-            description TEXT,
-            source TEXT,
-            scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status TEXT DEFAULT 'pending'
-        )
-        ''')
-        
-        # Analyzed jobs (matched and displayed to user)
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS analyzed_jobs (
-            id SERIAL PRIMARY KEY,
-            profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
-            job_id TEXT,
-            company TEXT,
-            title TEXT,
-            url TEXT,
-            tier INTEGER,
-            match_score INTEGER,
-            experience_required INTEGER,
-            role_match_pct INTEGER,
-            skill_match_pct INTEGER,
-            reasoning TEXT,
-            tailored_bullets TEXT DEFAULT '[]',
-            analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-        
-        # API keys
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS api_keys (
-            id SERIAL PRIMARY KEY,
-            profile_id INTEGER UNIQUE REFERENCES profiles(id) ON DELETE CASCADE,
-            anthropic_key TEXT,
-            openrouter_key TEXT,
-            jsearch_key TEXT,
-            adzuna_id TEXT,
-            adzuna_key TEXT
-        )
-        ''')
-        
-        # Create indexes for performance
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_raw_jobs_profile_status ON raw_jobs(profile_id, status)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_raw_jobs_scraped ON raw_jobs(scraped_at)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_analyzed_jobs_profile ON analyzed_jobs(profile_id, analyzed_at)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_analyzed_jobs_tier ON analyzed_jobs(profile_id, tier, match_score)')
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
-        
-        print("✅ PostgreSQL database initialized")
+        print("PostgreSQL database initialized")
     def migrate_database(self):
         """Migrate database to add new columns if they don't exist"""
         conn = self.get_connection()
