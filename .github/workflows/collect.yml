@@ -2,7 +2,7 @@ name: Daily Job Collection
 
 on:
   schedule:
-    - cron: '0 9 * * *'   # 9 AM UTC every day
+    - cron: '0 12 * * *'   # 7 AM EST every day
   workflow_dispatch:        # also run manually from GitHub Actions tab
 
 jobs:

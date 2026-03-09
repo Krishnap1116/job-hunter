@@ -1441,41 +1441,8 @@ else:
 
         # ── SCHEDULE ─────────────────────────
         with tab_schedule:
-            sched = db.get_profile_by_id(profile_id)
-            cur_time    = sched.get('collection_time', '09:00') or '09:00'
             cur_lookback = db.get_job_lookback_hours(profile_id)
 
-            st.caption("Control when GitHub Actions collects fresh jobs and how far back to look.")
-
-            # ── Collection time ───────────────────────────────
-            st.markdown('<div class="sec-hdr">Daily Collection Time (UTC)</div>', unsafe_allow_html=True)
-            st.caption("GitHub Actions runs on UTC. e.g. 9 AM PST = 17:00 UTC, 9 AM EST = 14:00 UTC.")
-
-            friendly = {
-                "00:00": "12:00 AM UTC  (7 PM EST / 4 PM PST)",
-                "02:00": "2:00 AM UTC   (9 PM EST / 6 PM PST)",
-                "05:00": "5:00 AM UTC   (12 AM EST / 9 PM PST)",
-                "09:00": "9:00 AM UTC   (4 AM EST / 1 AM PST) — default",
-                "12:00": "12:00 PM UTC  (7 AM EST / 4 AM PST)",
-                "14:00": "2:00 PM UTC   (9 AM EST / 6 AM PST)",
-                "17:00": "5:00 PM UTC   (12 PM EST / 9 AM PST)",
-                "20:00": "8:00 PM UTC   (3 PM EST / 12 PM PST)",
-            }
-
-            col_a, col_b = st.columns(2)
-            with col_a:
-                selected_time = st.selectbox(
-                    "Collection time (UTC)",
-                    options=list(friendly.keys()),
-                    index=list(friendly.keys()).index(cur_time) if cur_time in friendly else 3,
-                    format_func=lambda t: friendly.get(t, t + " UTC"),
-                )
-            with col_b:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.caption(f"Currently saved: **{cur_time} UTC**")
-
-            # ── Job lookback window ───────────────────────────
-            st.markdown("---")
             st.markdown('<div class="sec-hdr">Job Lookback Window</div>', unsafe_allow_html=True)
             st.caption("How far back to look for new jobs each time you open the app. Shorter = fewer, fresher jobs. Longer = more jobs but more Claude cost.")
 
@@ -1487,32 +1454,25 @@ else:
                 72: "72 hours  — catch up after a weekend",
             }
 
-            col_c, col_d = st.columns(2)
-            with col_c:
+            col_a, col_b = st.columns(2)
+            with col_a:
                 selected_lookback = st.selectbox(
                     "Lookback window",
                     options=list(lookback_options.keys()),
                     index=list(lookback_options.keys()).index(cur_lookback) if cur_lookback in lookback_options else 2,
                     format_func=lambda h: lookback_options[h],
                 )
-            with col_d:
+            with col_b:
                 st.markdown("<br>", unsafe_allow_html=True)
-                est_cost = selected_lookback * 0.003  # rough estimate
+                est_cost = selected_lookback * 0.003
                 st.caption(f"Currently saved: **{cur_lookback}h** · Est. ~${est_cost:.2f} per analysis run")
 
-            # ── Workflow snippet ──────────────────────────────
-            hour = int(selected_time.split(":")[0])
             st.markdown("---")
-            st.markdown('<div class="sec-hdr">Update Your Workflow File</div>', unsafe_allow_html=True)
-            st.caption("After saving, copy this into `.github/workflows/collect_jobs.yml` and commit:")
-            yml_snippet = "on:\n  schedule:\n    - cron: '0 " + str(hour) + " * * *'   # " + selected_time + " UTC daily\n  workflow_dispatch:  # keep this to run manually"
-            st.code(yml_snippet, language="yaml")
-            st.caption("Commit the file — GitHub picks it up automatically with no redeploy needed.")
+            st.caption("ℹ️ Jobs are collected once daily via GitHub Actions. The collection time is global and set in the workflow file — it is not configurable per user.")
 
-            if st.button("Save Schedule", type="primary"):
-                db.update_schedule_settings(profile_id, selected_time, True)
+            if st.button("Save", type="primary"):
                 db.set_job_lookback_hours(profile_id, selected_lookback)
-                st.success(f"✅ Saved — collecting at {selected_time} UTC, looking back {selected_lookback}h for new jobs.")
+                st.success(f"✅ Saved — looking back {selected_lookback}h for new jobs.")
 
         # ── PROFILE ───────────────────────────
         with tab_profile:
