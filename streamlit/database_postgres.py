@@ -109,6 +109,12 @@ class JobHunterDB:
                 is_active  BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''',
+            '''CREATE TABLE IF NOT EXISTS login_sessions (
+                token      TEXT PRIMARY KEY,
+                profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL '30 days')
+            )''',
             '''CREATE TABLE IF NOT EXISTS global_raw_jobs (
                 id         SERIAL PRIMARY KEY,
                 job_id     TEXT UNIQUE,
@@ -589,6 +595,44 @@ class JobHunterDB:
             except Exception:
                 pass
         return roles
+
+    # ── Session token methods ──────────────────────────────────
+    def create_session(self, profile_id):
+        """Create a secure random session token for a profile."""
+        import secrets
+        token = secrets.token_urlsafe(32)
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                # Clean old expired sessions for this user first
+                cur.execute(
+                    "DELETE FROM login_sessions WHERE profile_id = %s AND expires_at < NOW()",
+                    (profile_id,)
+                )
+                cur.execute(
+                    "INSERT INTO login_sessions (token, profile_id) VALUES (%s, %s)",
+                    (token, profile_id)
+                )
+            conn.commit()
+        return token
+
+    def get_profile_by_token(self, token):
+        """Look up a profile by session token. Returns None if expired or invalid."""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT p.* FROM profiles p
+                       JOIN login_sessions s ON s.profile_id = p.id
+                       WHERE s.token = %s AND s.expires_at > NOW()""",
+                    (token,)
+                )
+                return cur.fetchone()
+
+    def delete_session(self, token):
+        """Invalidate a session token on logout."""
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM login_sessions WHERE token = %s", (token,))
+            conn.commit()
 
     def get_profile_by_id(self, profile_id):
         """Get profile by ID"""

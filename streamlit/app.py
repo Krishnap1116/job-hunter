@@ -471,20 +471,23 @@ for k, v in DEFAULTS.items():
 # We intentionally do NOT store profile_id in the URL —
 # sharing the URL should never auto-login someone else's account.
 # ─────────────────────────────────────────────
-# SECURITY: Ignore ALL URL parameters — profile_id is NEVER in the URL.
-# Even if someone manually types ?pid=1, it is cleared and ignored.
-# Login only happens via email entry — never via URL.
-if st.query_params:
-    st.query_params.clear()
-
-# Auto-restore session from remembered email (survives rerun within same session)
-if st.session_state.profile_id is None and st.session_state.get('remembered_email'):
-    try:
-        _found = db.get_profile_by_email(st.session_state.remembered_email)
-        if _found:
-            st.session_state.profile_id = _found['id']
-    except Exception:
-        pass
+# ── Secure session restore ────────────────────────────────────
+# We store a cryptographically random token in the URL (?t=...).
+# The token is 32 bytes of entropy — impossible to guess.
+# It maps to a profile_id server-side, never exposing the numeric ID.
+# On logout the token is deleted from the DB so it can't be reused.
+# ─────────────────────────────────────────────────────────────
+if st.session_state.profile_id is None:
+    _token = st.query_params.get('t')
+    if _token:
+        try:
+            _profile = db.get_profile_by_token(_token)
+            if _profile:
+                st.session_state.profile_id = _profile['id']
+                st.session_state.session_token = _token
+        except Exception:
+            # Invalid/expired token — clear it
+            st.query_params.clear()
 
 # ─────────────────────────────────────────────
 # Sidebar
@@ -567,7 +570,12 @@ with st.sidebar:
 
         st.markdown("---")
         if st.button("Sign Out", use_container_width=True):
-            pass  # nothing to clear — we don't store pid in URL
+            if st.session_state.get('session_token'):
+                try:
+                    db.delete_session(st.session_state.session_token)
+                except Exception:
+                    pass
+            st.query_params.clear()
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
@@ -675,11 +683,13 @@ if st.session_state.profile_id is None:
                                 'adzuna_id':     os.getenv("ADZUNA_APP_ID", ""),
                                 'adzuna_key':    os.getenv("ADZUNA_API_KEY", ""),
                             })
+                            _tok = db.create_session(pid)
                             st.session_state.profile_id = pid
-                            st.session_state.remembered_email = email.strip()
+                            st.session_state.session_token = _tok
                             st.session_state.page = "home"
                             st.session_state.pop('temp_profile', None)
                             st.session_state.pop('reg_anthropic_key', None)
+                            st.query_params['t'] = _tok
                             st.rerun()
                         else:
                             st.error("Email already registered. Sign in instead.")
@@ -692,9 +702,11 @@ if st.session_state.profile_id is None:
             if st.button("Sign In →", type="primary", use_container_width=True):
                 found = db.get_profile_by_email(email_in.strip())
                 if found:
+                    _tok = db.create_session(found['id'])
                     st.session_state.profile_id = found['id']
-                    st.session_state.remembered_email = email_in.strip()
+                    st.session_state.session_token = _tok
                     st.session_state.page = "home"
+                    st.query_params['t'] = _tok
                     st.rerun()
                 else:
                     st.error("No account found. Create one first.")

@@ -91,6 +91,16 @@ class JobHunterDB:
         )
         ''')
         
+        # Secure login sessions — token in URL instead of raw profile_id
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS login_sessions (
+            token      TEXT PRIMARY KEY,
+            profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
         # Global raw jobs — shared pool scraped once daily, no profile_id
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS global_raw_jobs (
@@ -321,6 +331,46 @@ class JobHunterDB:
             except Exception:
                 pass
         return roles
+
+    # ── Session token methods ──────────────────────────────────
+    def create_session(self, profile_id):
+        import secrets
+        from datetime import datetime, timedelta
+        token = secrets.token_urlsafe(32)
+        expires = (datetime.utcnow() + timedelta(days=30)).isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM login_sessions WHERE profile_id = ? AND expires_at < datetime('now')",
+                (profile_id,)
+            )
+            cursor.execute(
+                "INSERT INTO login_sessions (token, profile_id, expires_at) VALUES (?, ?, ?)",
+                (token, profile_id, expires)
+            )
+            conn.commit()
+        return token
+
+    def get_profile_by_token(self, token):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT p.* FROM profiles p
+                   JOIN login_sessions s ON s.profile_id = p.id
+                   WHERE s.token = ? AND s.expires_at > datetime('now')""",
+                (token,)
+            )
+            row = cursor.fetchone()
+            if row:
+                cols = [d[0] for d in cursor.description]
+                return dict(zip(cols, row))
+            return None
+
+    def delete_session(self, token):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM login_sessions WHERE token = ?", (token,))
+            conn.commit()
 
     def get_profile_by_id(self, profile_id):
         """Get profile by ID"""
