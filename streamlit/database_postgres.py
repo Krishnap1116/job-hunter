@@ -543,7 +543,9 @@ class JobHunterDB:
 
     def ensure_default_resume(self, profile_id):
         """Called on login — if profile has no resumes yet, migrate profile
-        roles/skills into a default 'Resume 1'. Safe to call every login."""
+        roles/skills into a default 'Resume 1'. Safe to call every login.
+        Also backfills resume_id=NULL rows in analyzed_jobs and user_job_status.
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM resumes WHERE profile_id = %s", (profile_id,))
@@ -555,11 +557,29 @@ class JobHunterDB:
             skills = json.loads(row[1]) if row and row[1] else []
             cursor.execute(
                 """INSERT INTO resumes (profile_id, label, target_roles, core_skills, is_active)
-                   VALUES (%s, %s, %s, %s, TRUE)""",
+                   VALUES (%s, %s, %s, %s, TRUE) RETURNING id""",
                 (profile_id, "Resume 1", json.dumps(roles), json.dumps(skills))
             )
+            resume_id = cursor.fetchone()[0]
             conn.commit()
-            print(f"Migrated profile {profile_id} to Resume 1")
+            print(f"Migrated profile {profile_id} to Resume 1 (id={resume_id})")
+
+        # Always backfill any NULL resume_id rows so old analyzed jobs remain visible
+        cursor.execute("SELECT id FROM resumes WHERE profile_id = %s AND is_active = TRUE LIMIT 1", (profile_id,))
+        row = cursor.fetchone()
+        if row:
+            active_id = row[0]
+            cursor.execute(
+                """UPDATE analyzed_jobs SET resume_id = %s
+                   WHERE profile_id = %s AND resume_id IS NULL""",
+                (active_id, profile_id)
+            )
+            cursor.execute(
+                """UPDATE user_job_status SET resume_id = %s
+                   WHERE profile_id = %s AND resume_id IS NULL""",
+                (active_id, profile_id)
+            )
+            conn.commit()
         cursor.close()
         conn.close()
 
@@ -1065,20 +1085,21 @@ class JobHunterDB:
         conn.close()
     
     def get_analyzed_jobs(self, profile_id, tier=None, resume_id=None):
-        """Get analyzed jobs for a specific resume (or all if resume_id is None)."""
+        """Get analyzed jobs for a specific resume.
+        Also includes jobs with resume_id=NULL (legacy) as a fallback."""
         conn = self.get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
 
         if tier and resume_id:
             cursor.execute('''
             SELECT * FROM analyzed_jobs
-            WHERE profile_id = %s AND resume_id = %s AND tier = %s
+            WHERE profile_id = %s AND (resume_id = %s OR resume_id IS NULL) AND tier = %s
             ORDER BY match_score DESC
             ''', (profile_id, resume_id, tier))
         elif resume_id:
             cursor.execute('''
             SELECT * FROM analyzed_jobs
-            WHERE profile_id = %s AND resume_id = %s
+            WHERE profile_id = %s AND (resume_id = %s OR resume_id IS NULL)
             ORDER BY tier ASC, match_score DESC
             ''', (profile_id, resume_id))
         elif tier:
@@ -1111,28 +1132,41 @@ class JobHunterDB:
             result.append(job_dict)
         return result
     
-    def get_stats(self, profile_id):
-        """Get statistics"""
+    def get_stats(self, profile_id, resume_id=None):
+        """Get statistics, filtered by resume_id if provided."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        
-        cursor.execute('SELECT COUNT(*) FROM raw_jobs WHERE profile_id = %s', (profile_id,))
-        total_jobs = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(*) FROM analyzed_jobs WHERE profile_id = %s', (profile_id,))
-        analyzed = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(*) FROM analyzed_jobs WHERE profile_id = %s AND tier = 1', (profile_id,))
-        tier1 = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(*) FROM analyzed_jobs WHERE profile_id = %s AND tier = 2', (profile_id,))
-        tier2 = cursor.fetchone()[0]
-        
+
+        if resume_id:
+            cursor.execute(
+                'SELECT COUNT(*) FROM analyzed_jobs WHERE profile_id = %s AND (resume_id = %s OR resume_id IS NULL)',
+                (profile_id, resume_id))
+            analyzed = cursor.fetchone()[0]
+
+            cursor.execute(
+                'SELECT COUNT(*) FROM analyzed_jobs WHERE profile_id = %s AND (resume_id = %s OR resume_id IS NULL) AND tier = 1',
+                (profile_id, resume_id))
+            tier1 = cursor.fetchone()[0]
+
+            cursor.execute(
+                'SELECT COUNT(*) FROM analyzed_jobs WHERE profile_id = %s AND (resume_id = %s OR resume_id IS NULL) AND tier = 2',
+                (profile_id, resume_id))
+            tier2 = cursor.fetchone()[0]
+        else:
+            cursor.execute('SELECT COUNT(*) FROM analyzed_jobs WHERE profile_id = %s', (profile_id,))
+            analyzed = cursor.fetchone()[0]
+
+            cursor.execute('SELECT COUNT(*) FROM analyzed_jobs WHERE profile_id = %s AND tier = 1', (profile_id,))
+            tier1 = cursor.fetchone()[0]
+
+            cursor.execute('SELECT COUNT(*) FROM analyzed_jobs WHERE profile_id = %s AND tier = 2', (profile_id,))
+            tier2 = cursor.fetchone()[0]
+
         cursor.close()
         conn.close()
-        
+
         return {
-            'total_jobs': total_jobs,
+            'total_jobs': 0,  # deprecated — use pool_stats instead
             'analyzed': analyzed,
             'tier1': tier1,
             'tier2': tier2
