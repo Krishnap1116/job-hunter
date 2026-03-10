@@ -471,11 +471,13 @@ for k, v in DEFAULTS.items():
 # We intentionally do NOT store profile_id in the URL —
 # sharing the URL should never auto-login someone else's account.
 # ─────────────────────────────────────────────
-# Clear any stale pid param from the URL (safety measure)
-if 'pid' in st.query_params:
+# SECURITY: Ignore ALL URL parameters — profile_id is NEVER in the URL.
+# Even if someone manually types ?pid=1, it is cleared and ignored.
+# Login only happens via email entry — never via URL.
+if st.query_params:
     st.query_params.clear()
 
-# Auto-restore session from remembered email (survives rerun but not full tab close)
+# Auto-restore session from remembered email (survives rerun within same session)
 if st.session_state.profile_id is None and st.session_state.get('remembered_email'):
     try:
         _found = db.get_profile_by_email(st.session_state.remembered_email)
