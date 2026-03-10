@@ -1060,6 +1060,44 @@ else:
 
         # ── Dashboard when idle (no new jobs or already analyzed) ──
         else:
+            # Show analyze button if there are unanalyzed jobs
+            if pending_count > 0 and has_anthropic and not st.session_state.get('analyzing'):
+                st.markdown(f"**{pending_count} unanalyzed jobs** are waiting in the pool.")
+                c1, c2, c3 = st.columns([1, 2, 2])
+                with c1:
+                    analyze_limit = st.number_input(
+                        "JOBS TO ANALYZE",
+                        min_value=1, max_value=pending_count,
+                        value=min(30, pending_count), step=5,
+                        key="idle_analyze_limit"
+                    )
+                with c2:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    est = analyze_limit * 2
+                    st.caption(f"⏱ ~{est//60}m {est%60}s &nbsp;&nbsp; 💰 ~${analyze_limit*0.002:.2f} API cost")
+                with c3:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    if st.button("🤖  Analyze Jobs", type="primary", use_container_width=True, key="idle_analyze_btn"):
+                        st.session_state.analyzing = True
+                        st.session_state.pending_analyze_limit = analyze_limit
+                        st.rerun()
+
+            if st.session_state.get('analyzing'):
+                limit = st.session_state.pop('pending_analyze_limit', 30)
+                jobs_to_run = db.get_global_jobs_for_user(profile_id, hours=user_lookback, resume_id=active_resume_id)[:limit]
+                if jobs_to_run:
+                    t1, t2, rej, reasons = run_analysis(jobs_to_run, label="Analyzing")
+                    st.session_state.analyzing = False
+                    db.set_last_analyzed(profile_id)
+                    if t1 + t2 > 0:
+                        st.success(f"✓ Done — 🌟 **{t1} Tier 1** · ⭐ **{t2} Tier 2** · {rej} filtered out")
+                        time.sleep(1.2)
+                        st.session_state.page = "matches"
+                        st.rerun()
+                    else:
+                        st.info(f"No strong matches in this batch ({rej} filtered). {pending_count - limit} jobs still waiting.")
+                        st.rerun()
+
             st.markdown("---")
             # ── Manual collect section ─────────────────────────
             col_l, col_r = st.columns([3, 1])
