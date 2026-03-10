@@ -467,22 +467,22 @@ for k, v in DEFAULTS.items():
         st.session_state[k] = v
 
 # ─────────────────────────────────────────────
-# Persist login across browser refreshes
-# st.query_params survives refresh; session_state does not.
-# On refresh: query_params still has pid=X → restore session.
-# On sign-out: query_params is cleared.
+# Login persists within a browser session via session_state only.
+# We intentionally do NOT store profile_id in the URL —
+# sharing the URL should never auto-login someone else's account.
 # ─────────────────────────────────────────────
-if st.session_state.profile_id is None:
+# Clear any stale pid param from the URL (safety measure)
+if 'pid' in st.query_params:
+    st.query_params.clear()
+
+# Auto-restore session from remembered email (survives rerun but not full tab close)
+if st.session_state.profile_id is None and st.session_state.get('remembered_email'):
     try:
-        pid_str = st.query_params.get('pid')
-        if pid_str:
-            pid = int(pid_str)
-            # Verify the profile actually exists in DB
-            check = db.get_profile_by_id(pid)
-            if check:
-                st.session_state.profile_id = pid
+        _found = db.get_profile_by_email(st.session_state.remembered_email)
+        if _found:
+            st.session_state.profile_id = _found['id']
     except Exception:
-        pass  # Bad param — ignore, stay logged out
+        pass
 
 # ─────────────────────────────────────────────
 # Sidebar
@@ -565,7 +565,7 @@ with st.sidebar:
 
         st.markdown("---")
         if st.button("Sign Out", use_container_width=True):
-            st.query_params.clear()
+            pass  # nothing to clear — we don't store pid in URL
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
@@ -674,10 +674,10 @@ if st.session_state.profile_id is None:
                                 'adzuna_key':    os.getenv("ADZUNA_API_KEY", ""),
                             })
                             st.session_state.profile_id = pid
+                            st.session_state.remembered_email = email.strip()
                             st.session_state.page = "home"
                             st.session_state.pop('temp_profile', None)
                             st.session_state.pop('reg_anthropic_key', None)
-                            st.query_params['pid'] = str(pid)
                             st.rerun()
                         else:
                             st.error("Email already registered. Sign in instead.")
@@ -691,8 +691,8 @@ if st.session_state.profile_id is None:
                 found = db.get_profile_by_email(email_in.strip())
                 if found:
                     st.session_state.profile_id = found['id']
+                    st.session_state.remembered_email = email_in.strip()
                     st.session_state.page = "home"
-                    st.query_params['pid'] = str(found['id'])
                     st.rerun()
                 else:
                     st.error("No account found. Create one first.")
@@ -856,23 +856,57 @@ else:
                             else:
                                 with st.spinner("Parsing with Claude..."):
                                     try:
-                                        from resume_parser import ResumeParser
-                                        parser    = ResumeParser(api_key=api_keys['anthropic_key'])
+                                        import tempfile, os as _os
+                                        from resume_parser import parse_resume_with_claude
                                         pdf_bytes = uploaded_res.read()
-                                        parsed    = parser.parse_resume(pdf_bytes)
-                                        db.create_resume(
-                                            profile_id, new_label.strip(),
-                                            parsed.get('target_roles', []),
-                                            parsed.get('core_skills', []),
-                                            parsed.get('resume_text', ''),
-                                            make_active=True
-                                        )
-                                        st.session_state.show_add_resume = False
-                                        st.session_state.auto_analyzed   = False
-                                        st.session_state.auto_analyzing  = False
+                                        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                                            tmp.write(pdf_bytes)
+                                            tmp_path = tmp.name
+                                        parsed = parse_resume_with_claude(tmp_path, api_key=api_keys['anthropic_key'])
+                                        _os.unlink(tmp_path)
+                                        st.session_state['pending_resume_parsed'] = parsed
+                                        st.session_state['pending_resume_label']  = new_label.strip()
                                         st.rerun()
                                     except Exception as e:
                                         st.error(f"Parse error: {e}")
+
+                # ── Review step: show parsed roles before saving ──
+                if st.session_state.get('pending_resume_parsed'):
+                    parsed = st.session_state['pending_resume_parsed']
+                    st.success("✅ Resume parsed! Review the extracted roles before saving:")
+                    roles_default = ', '.join(parsed.get('target_roles', []))
+                    skills_default = ', '.join(parsed.get('core_skills', []))
+                    edited_roles  = st.text_input(
+                        "🎯 Target Roles (edit if wrong — these determine what jobs you see!)",
+                        value=roles_default, key="confirm_roles"
+                    )
+                    edited_skills = st.text_input(
+                        "🛠 Core Skills", value=skills_default, key="confirm_skills"
+                    )
+                    st.caption("💡 Make sure target roles reflect what you're **actively applying for**, e.g. 'ML Engineer, AI Engineer, LLM Engineer'")
+                    cc1, cc2 = st.columns(2)
+                    with cc1:
+                        if st.button("✅ Save Resume", type="primary", key="confirm_save_resume"):
+                            roles_list  = [r.strip() for r in edited_roles.split(',') if r.strip()]
+                            skills_list = [s.strip() for s in edited_skills.split(',') if s.strip()]
+                            db.create_resume(
+                                profile_id,
+                                st.session_state['pending_resume_label'],
+                                roles_list, skills_list,
+                                parsed.get('resume_text', ''),
+                                make_active=True
+                            )
+                            del st.session_state['pending_resume_parsed']
+                            del st.session_state['pending_resume_label']
+                            st.session_state.show_add_resume  = False
+                            st.session_state.auto_analyzed    = False
+                            st.session_state.auto_analyzing   = False
+                            st.rerun()
+                    with cc2:
+                        if st.button("✗ Discard", key="discard_parsed_resume"):
+                            del st.session_state['pending_resume_parsed']
+                            del st.session_state['pending_resume_label']
+                            st.rerun()
                     with c2:
                         if st.button("Cancel", key="cancel_add_res"):
                             st.session_state.show_add_resume = False
@@ -1012,43 +1046,6 @@ else:
 
         # ── Dashboard when idle (no new jobs or already analyzed) ──
         else:
-            # Even in idle state, if there are unanalyzed jobs show the button first
-            if pending_count > 0 and has_anthropic and not st.session_state.get('analyzing'):
-                st.markdown(f"**{pending_count} unanalyzed jobs** are waiting in the pool.")
-                c1, c2, c3 = st.columns([1, 2, 2])
-                with c1:
-                    analyze_limit = st.number_input(
-                        "Jobs to analyze",
-                        min_value=1, max_value=pending_count,
-                        value=min(30, pending_count), step=5,
-                        key="idle_analyze_num_input"
-                    )
-                with c2:
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    est = analyze_limit * 2
-                    st.caption(f"⏱ ~{est//60}m {est%60}s &nbsp;&nbsp; 💰 ~${analyze_limit*0.002:.2f} API cost")
-                with c3:
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    if st.button("🤖  Analyze Jobs", type="primary", use_container_width=True, key="idle_analyze_btn"):
-                        st.session_state.analyzing = True
-                        st.session_state.pending_analyze_limit = analyze_limit
-                        st.rerun()
-
-            if st.session_state.get('analyzing'):
-                limit = st.session_state.pop('pending_analyze_limit', 30)
-                jobs_to_run = db.get_global_jobs_for_user(profile_id, hours=user_lookback, resume_id=active_resume_id)[:limit]
-                if jobs_to_run:
-                    t1, t2, rej, reasons = run_analysis(jobs_to_run, label="Analyzing")
-                    st.session_state.analyzing = False
-                    if t1 + t2 > 0:
-                        st.success(f"✓ Done — 🌟 **{t1} Tier 1** · ⭐ **{t2} Tier 2** · {rej} filtered out")
-                        time.sleep(1.2)
-                        st.session_state.page = "matches"
-                        st.rerun()
-                    else:
-                        st.info(f"No strong matches in this batch ({rej} filtered). {pending_count - limit} jobs still waiting.")
-                        st.rerun()
-
             st.markdown("---")
             # ── Manual collect section ─────────────────────────
             col_l, col_r = st.columns([3, 1])
@@ -1387,6 +1384,7 @@ else:
                 help="Get yours at console.anthropic.com"
             )
             st.caption("✅ **Greenhouse, Lever, RemoteOK, Jobicy** run for free — no keys needed.")
+
             c1, c2 = st.columns(2)
             with c1:
                 new_jsearch = st.text_input("JSearch API Key", type="password",
