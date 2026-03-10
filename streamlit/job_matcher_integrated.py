@@ -158,13 +158,14 @@ class IntegratedMatcher:
             result['role_match_percentage']      = result.get('role_match_percentage') or 0
 
             # Hard override: catch experience disqualifiers Claude missed
+            # Reject if job requires MORE years than user's max, regardless of what Claude said
             max_exp = self.filter_config.get('max_experience_required', 5)
             exp_min = result.get('experience_required_min', 0)
-            if (exp_min >= max_exp
-                    and result.get('candidate_qualifies_experience')
+            if (exp_min > max_exp
                     and not self._is_flexible((job.get('description') or '').lower())):
                 result['candidate_qualifies_experience'] = False
                 result['overall_qualified'] = False
+                print(f"  ⛔ Hard reject: {exp_min}+ yrs required, max is {max_exp}")
 
             result['match_score'] = self._calculate_score(result)
             return result

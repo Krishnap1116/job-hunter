@@ -745,7 +745,6 @@ else:
     profile_id    = st.session_state.profile_id
     profile       = db.get_profile_by_id(profile_id)
     api_keys      = db.get_api_keys(profile_id)
-    stats         = db.get_stats(profile_id)
     user_lookback = db.get_job_lookback_hours(profile_id)
 
     # Ensure every profile has at least one resume (migrates old profiles)
@@ -753,6 +752,9 @@ else:
     all_resumes    = db.get_resumes(profile_id)
     active_resume  = db.get_active_resume(profile_id)
     active_resume_id = active_resume['id'] if active_resume else None
+
+    # Stats filtered by active resume so numbers match Matches page
+    stats = db.get_stats(profile_id, resume_id=active_resume_id)
 
     # ══════════════════════════════════════════
     # HOME — Smart auto-analyze dashboard
@@ -797,7 +799,7 @@ else:
             except Exception:
                 last_scraped_str = str(pool_stats['last_scraped'])[:16]
 
-        stats = db.get_stats(profile_id)
+        stats = db.get_stats(profile_id, resume_id=active_resume_id)
 
         st.markdown(f"""
         <div class="stat-row">
@@ -1356,11 +1358,11 @@ else:
                     st.markdown("<br>", unsafe_allow_html=True)
                     if job.get('applied'):
                         if st.button("↩ Undo", key=f"undo_{job['job_id']}", use_container_width=True):
-                            db.unmark_job_applied(job['job_id'])
+                            db.unmark_job_applied(job['job_id'], profile_id=profile_id)
                             st.rerun()
                     else:
                         if st.button("✅ Applied", key=f"applied_{job['job_id']}", use_container_width=True):
-                            db.mark_job_applied(job['job_id'])
+                            db.mark_job_applied(job['job_id'], profile_id=profile_id)
                             st.rerun()
 
                 st.markdown("<hr>", unsafe_allow_html=True)

@@ -564,21 +564,53 @@ class JobHunterDB:
             conn.commit()
             print(f"Migrated profile {profile_id} to Resume 1 (id={resume_id})")
 
-        # Always backfill any NULL resume_id rows so old analyzed jobs remain visible
+        # Backfill NULL resume_id rows — skip any that would cause a duplicate
         cursor.execute("SELECT id FROM resumes WHERE profile_id = %s AND is_active = TRUE LIMIT 1", (profile_id,))
         row = cursor.fetchone()
         if row:
             active_id = row[0]
-            cursor.execute(
-                """UPDATE analyzed_jobs SET resume_id = %s
-                   WHERE profile_id = %s AND resume_id IS NULL""",
-                (active_id, profile_id)
-            )
-            cursor.execute(
-                """UPDATE user_job_status SET resume_id = %s
-                   WHERE profile_id = %s AND resume_id IS NULL""",
-                (active_id, profile_id)
-            )
+            # Only update rows where no version with a real resume_id already exists
+            cursor.execute("""
+                UPDATE analyzed_jobs SET resume_id = %s
+                WHERE profile_id = %s AND resume_id IS NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM analyzed_jobs a2
+                    WHERE a2.profile_id = analyzed_jobs.profile_id
+                    AND a2.job_id = analyzed_jobs.job_id
+                    AND a2.resume_id IS NOT NULL
+                )
+            """, (active_id, profile_id))
+            # Delete any leftover NULLs that are true duplicates of existing rows
+            cursor.execute("""
+                DELETE FROM analyzed_jobs
+                WHERE profile_id = %s AND resume_id IS NULL
+                AND EXISTS (
+                    SELECT 1 FROM analyzed_jobs a2
+                    WHERE a2.profile_id = analyzed_jobs.profile_id
+                    AND a2.job_id = analyzed_jobs.job_id
+                    AND a2.resume_id IS NOT NULL
+                )
+            """, (profile_id,))
+            cursor.execute("""
+                UPDATE user_job_status SET resume_id = %s
+                WHERE profile_id = %s AND resume_id IS NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM user_job_status u2
+                    WHERE u2.profile_id = user_job_status.profile_id
+                    AND u2.job_id = user_job_status.job_id
+                    AND u2.resume_id IS NOT NULL
+                )
+            """, (active_id, profile_id))
+            cursor.execute("""
+                DELETE FROM user_job_status
+                WHERE profile_id = %s AND resume_id IS NULL
+                AND EXISTS (
+                    SELECT 1 FROM user_job_status u2
+                    WHERE u2.profile_id = user_job_status.profile_id
+                    AND u2.job_id = user_job_status.job_id
+                    AND u2.resume_id IS NOT NULL
+                )
+            """, (profile_id,))
             conn.commit()
         cursor.close()
         conn.close()
@@ -652,6 +684,38 @@ class JobHunterDB:
         with self.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM login_sessions WHERE token = %s", (token,))
+            conn.commit()
+
+    def mark_job_applied(self, job_id, profile_id=None):
+        """Mark a job as applied."""
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                if profile_id:
+                    cur.execute(
+                        "UPDATE analyzed_jobs SET applied = 1, applied_at = NOW() WHERE job_id = %s AND profile_id = %s",
+                        (job_id, profile_id)
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE analyzed_jobs SET applied = 1, applied_at = NOW() WHERE job_id = %s",
+                        (job_id,)
+                    )
+            conn.commit()
+
+    def unmark_job_applied(self, job_id, profile_id=None):
+        """Unmark a job as applied."""
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                if profile_id:
+                    cur.execute(
+                        "UPDATE analyzed_jobs SET applied = 0, applied_at = NULL WHERE job_id = %s AND profile_id = %s",
+                        (job_id, profile_id)
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE analyzed_jobs SET applied = 0, applied_at = NULL WHERE job_id = %s",
+                        (job_id,)
+                    )
             conn.commit()
 
     def get_profile_by_id(self, profile_id):
